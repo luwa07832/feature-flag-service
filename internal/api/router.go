@@ -8,8 +8,8 @@ import (
 	"github.com/luwa07832/feature-flag-service/internal/store"
 )
 
-// NewRouter wires the public HTTP surface. Only the health entry is published today; the service
-// contract in README.md describes the error shape every entry must keep.
+// NewRouter wires the public HTTP surface. Every entry keeps the error shape
+// described in README.md: a single top-level error object with code/message.
 func NewRouter(st *store.Store) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
@@ -22,6 +22,18 @@ func NewRouter(st *store.Store) *gin.Engine {
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "database": "ok"})
 	})
+
+	v1 := router.Group("/api/v1")
+	{
+		v1.POST("/environments", createEnvironment(st))
+		v1.POST("/flags", createFlag(st))
+		v1.GET("/flags", listFlags(st))
+		v1.GET("/environments/:environment/evaluate", evaluate(st))
+		v1.GET("/environments/:environment/evaluate-at", evaluateAt(st))
+		v1.GET("/environments/:environment/flags/:flagKey/history", getHistory(st))
+		v1.PUT("/environments/:environment/flags/:flagKey/config", putConfig(st))
+		v1.DELETE("/environments/:environment/flags/:flagKey/config", deleteConfig(st))
+	}
 
 	router.NoRoute(func(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"code": "route_not_found", "message": "no route matches this path"}})

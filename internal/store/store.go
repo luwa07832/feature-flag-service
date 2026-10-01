@@ -3,18 +3,31 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"sync/atomic"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
 
 // Store wraps the SQLite handle so callers never touch database/sql directly.
 type Store struct {
-	db *sql.DB
+	db  *sql.DB
+	now func() time.Time
+	// versionSeq disambiguates configuration versions created within the same
+	// nanosecond. Configuration history is append-only.
+	versionSeq atomic.Uint64
 }
 
 // Open prepares the database file and the schema this service needs.
 func Open(path string) (*Store, error) {
+	return OpenWithClock(path, time.Now)
+}
+
+// OpenWithClock is Open with an injectable clock; production uses Open and
+// deterministic tests use this entry point.
+func OpenWithClock(path string, now func() time.Time) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -27,8 +40,15 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
-	return &Store{db: db}, nil
+	if now == nil {
+		now = time.Now
+	}
+	return &Store{db: db, now: now}, nil
 }
+
+// Now returns the current time in the service's unified Unix-nanosecond
+// representation.
+func (s *Store) Now() int64 { return s.now().UnixNano() }
 
 // Ping reports whether the storage layer is usable.
 func (s *Store) Ping() error { return s.db.Ping() }
@@ -36,9 +56,39 @@ func (s *Store) Ping() error { return s.db.Ping() }
 // Close releases the database handle.
 func (s *Store) Close() error { return s.db.Close() }
 
+// ErrNotFound reports a lookup that matched nothing.
+var ErrNotFound = errors.New("not found")
+
+// ErrAlreadyExists reports a create request for an existing key.
+var ErrAlreadyExists = errors.New("already exists")
+
 const schema = `
 CREATE TABLE IF NOT EXISTS service_metadata (
 	key   TEXT PRIMARY KEY,
 	value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS environments (
+	key        TEXT PRIMARY KEY,
+	created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS flags (
+	key        TEXT PRIMARY KEY,
+	created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS config_history (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	flag_key    TEXT NOT NULL,
+	environment TEXT NOT NULL,
+	version     TEXT NOT NULL UNIQUE,
+	enabled     INTEGER NOT NULL,
+	percentage  INTEGER NOT NULL,
+	starts_at   INTEGER,
+	ends_at     INTEGER,
+	changed_at  INTEGER NOT NULL,
+	tombstone   INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_config_env_time
+	ON config_history(environment, changed_at, id);
+CREATE INDEX IF NOT EXISTS idx_config_flag_env_time
+	ON config_history(flag_key, environment, changed_at, id);
 `
