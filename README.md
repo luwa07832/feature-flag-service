@@ -103,6 +103,37 @@ go run .
 
 带 `marker` 时返回确定状态（`on` / `off` / `unconfigured`），每个开关同时给出该状态所依据的 `version`，可直接与变更历史中的记录对照。同一环境、同一历史时点、同一标记重复查询结果完全相同；查询不会写入任何变更记录。
 
+### 单次开关判定解释（本次新增）
+
+`GET /api/v1/environments/{environment}/flags/{flagKey}/explain?marker=alpha&at=2026-01-01T05:00:00Z`
+
+只解释一个开关对一个标记的一次判定，是纯查询：不追加任何变更记录，相同输入重复查询结果完全相同。
+
+- `marker`（必填）沿用统一标记格式；缺失、为空或非法均返回 `InvalidMarker`。
+- `at`（可选）缺省时按服务当前时刻判定；提供时按 RFC 3339 绝对时刻还原 `changed_at` 不晚于该时点的最后一条配置版本（同时刻按写入顺序取最后一条）。提供但为空或非法时返回 `InvalidTimestamp`。
+
+响应字段固定为 `environment`、`flag_key`、`marker`、`evaluated_at`、`status`、`reason`、`config`：
+
+```json
+{
+  "environment": "prod",
+  "flag_key": "checkout",
+  "marker": "alpha",
+  "evaluated_at": "2026-01-01T05:00:00Z",
+  "status": "on",
+  "reason": "enabled",
+  "config": {"version":"cfg-…","enabled":true,"percentage":50,
+             "window":{"starts_at":null,"ends_at":null}}
+}
+```
+
+- `status` 只使用 `on`、`off`、`unconfigured`；`reason` 只使用 `enabled`、`disabled`、`window_inactive`、`rollout_miss`、`unconfigured`。
+- 判定顺序固定：无配置（没有任何不晚于 `at` 的版本）或最后版本为墓碑 → `unconfigured` / `unconfigured` 且 `config` 为 `null`；否则 `enabled=false` → `disabled`；窗口不覆盖判定时点（`starts_at <= 时点 < ends_at`）→ `window_inactive`；灰度分桶未命中 → `rollout_miss`；其余 → `on` / `enabled`。
+- 有配置时 `config` 含 `version`、`enabled`、`percentage`、`window`；空窗口端点仍为 `null`。`version` 可与变更历史中的版本直接对照。
+- `at` 早于首条配置时仍返回 200 且 `reason` 为 `unconfigured`，不倒灌后续配置；时间窗口与灰度分桶均沿用既有规则。
+
+校验顺序固定为：路径参数 → `at` → `marker` → 环境 → 开关。不合法路径返回 400 `InvalidRequest`，未知环境返回 404 `EnvironmentNotFound`，未知开关返回 404 `FlagNotFound`；其他服务错误沿用统一的单个 `error` 对象。
+
 ## 错误约定
 
 所有错误响应都是单个顶层 `error` 对象，包含 `code` 与 `message` 两个字符串字段；`message` 不包含 SQL、堆栈或文件路径。

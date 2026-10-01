@@ -221,6 +221,93 @@ func markerOrNull(marker string) any {
 	return marker
 }
 
+// explainFlag answers one deterministic flag decision for one marker. It is a
+// pure read: it never appends history, and identical inputs always produce
+// identical output. Without an at query parameter the decision uses the
+// service's current time; with one it restores the last version whose
+// changed_at is not later than at. Validation order is fixed: path, at,
+// marker, environment, flag.
+func explainFlag(st *store.Store) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		environment := c.Param("environment")
+		flagKey := c.Param("flagKey")
+		if !validPathKeys(c, environment, flagKey) {
+			return
+		}
+		at := st.Now()
+		if rawAt, provided := c.GetQuery("at"); provided {
+			parsed, err := timeutil.Parse(rawAt)
+			if err != nil {
+				fail(c, http.StatusBadRequest, codeInvalidTimestamp, "at must be an RFC 3339 timestamp")
+				return
+			}
+			at = parsed
+		}
+		marker := c.Query("marker")
+		if marker == "" {
+			fail(c, http.StatusBadRequest, codeInvalidMarker, "marker query parameter is required")
+			return
+		}
+		if err := eval.ValidateMarker(marker); err != nil {
+			fail(c, http.StatusBadRequest, codeInvalidMarker, "marker must match [a-z0-9_-]{1,64}")
+			return
+		}
+		exists, err := st.EnvironmentExists(environment)
+		if err != nil {
+			internalFailure(c)
+			return
+		}
+		if !exists {
+			fail(c, http.StatusNotFound, codeEnvironmentNotFound, "the environment does not exist")
+			return
+		}
+		flagExists, err := st.FlagExists(flagKey)
+		if err != nil {
+			internalFailure(c)
+			return
+		}
+		if !flagExists {
+			fail(c, http.StatusNotFound, codeFlagNotFound, "the flag does not exist")
+			return
+		}
+		record, err := st.LatestConfigAt(flagKey, environment, at)
+		if err != nil {
+			internalFailure(c)
+			return
+		}
+
+		var config *eval.Configuration
+		var configBody any
+		switch {
+		case record == nil || record.Tombstone:
+			configBody = nil
+		default:
+			config = &eval.Configuration{
+				FlagKey:    record.FlagKey,
+				Enabled:    record.Enabled,
+				Percentage: record.Percentage,
+				Window:     eval.Window{StartsAt: record.StartsAt, EndsAt: record.EndsAt},
+			}
+			configBody = gin.H{
+				"version":    record.Version,
+				"enabled":    record.Enabled,
+				"percentage": record.Percentage,
+				"window":     windowJSON(record.StartsAt, record.EndsAt),
+			}
+		}
+		status, reason := eval.Explain(environment, config, marker, at)
+		c.JSON(http.StatusOK, gin.H{
+			"environment":  environment,
+			"flag_key":     flagKey,
+			"marker":       marker,
+			"evaluated_at": timeutil.Format(at),
+			"status":       string(status),
+			"reason":       string(reason),
+			"config":       configBody,
+		})
+	}
+}
+
 func hasRestorableConfig(effective map[string]store.ConfigRecord) bool {
 	for _, record := range effective {
 		if !record.Tombstone {

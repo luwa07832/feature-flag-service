@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -94,6 +95,30 @@ func (s *Store) EffectiveConfigsAt(environment string, at int64) (map[string]Con
 		return nil, err
 	}
 	return effective, nil
+}
+
+// LatestConfigAt restores one flag's last configuration record in environment
+// as of at: the record with the greatest changed_at not later than at, ties
+// broken by insertion order (so a same-instant rewrite wins). It returns nil
+// without error when no record exists by at. The returned record may be a
+// tombstone; callers treat that as the unconfigured state.
+func (s *Store) LatestConfigAt(flagKey, environment string, at int64) (*ConfigRecord, error) {
+	row := s.db.QueryRow(
+		`SELECT flag_key, environment, version, enabled, percentage, starts_at, ends_at, changed_at, tombstone
+		 FROM config_history
+		 WHERE flag_key = ? AND environment = ? AND changed_at <= ?
+		 ORDER BY changed_at DESC, id DESC
+		 LIMIT 1`,
+		flagKey, environment, at,
+	)
+	record, err := scanConfig(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &record, nil
 }
 
 // rowScanner is satisfied by both *sql.Rows and *sql.Row scans inside a tx.

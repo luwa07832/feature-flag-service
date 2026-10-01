@@ -26,6 +26,24 @@ const (
 	StatusNotEvaluated Status = "not_evaluated"
 )
 
+// Reason explains why a flag decision landed on its status. The explain
+// surface is the only entry that exposes the individual rule that fired.
+type Reason string
+
+const (
+	// ReasonUnconfigured: no live configuration existed at the queried time.
+	ReasonUnconfigured Reason = "unconfigured"
+	// ReasonDisabled: a configuration existed but its enabled flag was false.
+	ReasonDisabled Reason = "disabled"
+	// ReasonWindowInactive: enabled, but the window does not cover the time.
+	ReasonWindowInactive Reason = "window_inactive"
+	// ReasonRolloutMiss: enabled and inside the window, but the marker did
+	// not land in the rollout bucket.
+	ReasonRolloutMiss Reason = "rollout_miss"
+	// ReasonEnabled: every gate passed and the flag is on for the marker.
+	ReasonEnabled Reason = "enabled"
+)
+
 // MarkerPattern is the published marker grammar: 1-64 lowercase letters,
 // digits, underscores or hyphens. The same grammar is enforced by the
 // real-time evaluator.
@@ -103,15 +121,28 @@ type Configuration struct {
 // Evaluated resolves one flag for one marker at at. A nil configuration yields
 // StatusUnconfigured rather than reusing any current or later configuration.
 func Evaluated(environment string, cfg *Configuration, marker string, at int64) Status {
+	status, _ := Explain(environment, cfg, marker, at)
+	return status
+}
+
+// Explain resolves one flag for one marker at at and additionally reports the
+// single rule that determined the outcome. The decision order is fixed:
+// unconfigured, disabled, window_inactive, rollout_miss, enabled. A nil
+// configuration yields StatusUnconfigured/ReasonUnconfigured rather than
+// reusing any current or later configuration.
+func Explain(environment string, cfg *Configuration, marker string, at int64) (Status, Reason) {
 	if cfg == nil {
-		return StatusUnconfigured
+		return StatusUnconfigured, ReasonUnconfigured
 	}
-	if !cfg.Enabled || !cfg.Window.ActiveAt(at) {
-		return StatusOff
+	if !cfg.Enabled {
+		return StatusOff, ReasonDisabled
+	}
+	if !cfg.Window.ActiveAt(at) {
+		return StatusOff, ReasonWindowInactive
 	}
 	rollout := Rollout{FlagKey: cfg.FlagKey, Environment: environment, Percentage: cfg.Percentage}
 	if !rollout.Served(marker) {
-		return StatusOff
+		return StatusOff, ReasonRolloutMiss
 	}
-	return StatusOn
+	return StatusOn, ReasonEnabled
 }
