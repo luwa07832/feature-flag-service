@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -159,4 +160,29 @@ func (s *Store) FlagExists(flagKey string) (bool, error) {
 		return false, fmt.Errorf("lookup flag: %w", err)
 	}
 	return true, nil
+}
+
+// EffectiveConfigAt restores the latest configuration record for one flag in
+// one environment as of at: the last record whose changed_at is not later than
+// at, ties broken by insertion order. It returns nil when the flag had no
+// record by at; the returned record may be a tombstone. The read never
+// backfills later configuration.
+func (s *Store) EffectiveConfigAt(flagKey, environment string, at int64) (*ConfigRecord, error) {
+	row := s.db.QueryRow(
+		`SELECT flag_key, environment, version, enabled, percentage, starts_at, ends_at, changed_at, tombstone
+		 FROM config_history
+		 WHERE flag_key = ? AND environment = ? AND changed_at <= ?
+		 ORDER BY changed_at DESC, id DESC
+		 LIMIT 1`,
+		flagKey, environment, at,
+	)
+	record, err := scanConfig(row)
+	// scanConfig wraps sql.ErrNoRows, so match it with errors.Is.
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &record, nil
 }

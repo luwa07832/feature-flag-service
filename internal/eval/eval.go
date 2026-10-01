@@ -26,6 +26,22 @@ const (
 	StatusNotEvaluated Status = "not_evaluated"
 )
 
+// Reason is the vocabulary explaining why one evaluation produced its status.
+type Reason string
+
+const (
+	// ReasonEnabled means the flag served the marker.
+	ReasonEnabled Reason = "enabled"
+	// ReasonDisabled means the configuration's enabled switch is false.
+	ReasonDisabled Reason = "disabled"
+	// ReasonWindowInactive means the time window does not cover the instant.
+	ReasonWindowInactive Reason = "window_inactive"
+	// ReasonRolloutMiss means the marker fell outside the rollout bucket.
+	ReasonRolloutMiss Reason = "rollout_miss"
+	// ReasonUnconfigured means no effective configuration existed at the time.
+	ReasonUnconfigured Reason = "unconfigured"
+)
+
 // MarkerPattern is the published marker grammar: 1-64 lowercase letters,
 // digits, underscores or hyphens. The same grammar is enforced by the
 // real-time evaluator.
@@ -103,15 +119,26 @@ type Configuration struct {
 // Evaluated resolves one flag for one marker at at. A nil configuration yields
 // StatusUnconfigured rather than reusing any current or later configuration.
 func Evaluated(environment string, cfg *Configuration, marker string, at int64) Status {
+	status, _ := Explained(environment, cfg, marker, at)
+	return status
+}
+
+// Explained resolves one flag for one marker at at and reports the reason
+// behind the status. The decision order is fixed: unconfigured, disabled,
+// window_inactive, rollout_miss, enabled.
+func Explained(environment string, cfg *Configuration, marker string, at int64) (Status, Reason) {
 	if cfg == nil {
-		return StatusUnconfigured
+		return StatusUnconfigured, ReasonUnconfigured
 	}
-	if !cfg.Enabled || !cfg.Window.ActiveAt(at) {
-		return StatusOff
+	if !cfg.Enabled {
+		return StatusOff, ReasonDisabled
+	}
+	if !cfg.Window.ActiveAt(at) {
+		return StatusOff, ReasonWindowInactive
 	}
 	rollout := Rollout{FlagKey: cfg.FlagKey, Environment: environment, Percentage: cfg.Percentage}
 	if !rollout.Served(marker) {
-		return StatusOff
+		return StatusOff, ReasonRolloutMiss
 	}
-	return StatusOn
+	return StatusOn, ReasonEnabled
 }

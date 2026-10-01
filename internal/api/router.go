@@ -31,6 +31,7 @@ func NewRouter(st *store.Store) *gin.Engine {
 		v1.GET("/environments/:environment/evaluate", evaluate(st))
 		v1.GET("/environments/:environment/evaluate-at", evaluateAt(st))
 		v1.GET("/environments/:environment/flags/:flagKey/history", getHistory(st))
+		v1.GET("/environments/:environment/flags/:flagKey/explain", explain(st))
 		v1.PUT("/environments/:environment/flags/:flagKey/config", putConfig(st))
 		v1.DELETE("/environments/:environment/flags/:flagKey/config", deleteConfig(st))
 	}

@@ -72,7 +72,38 @@ go run .
 
 按时间升序返回该开关在该环境中的全部配置版本（含墓碑），每条都带 `version`、`changed_at`、灰度比例、窗口与启用状态。
 
-### 按历史时点还原配置并评估（本次新增）
+### 单次判定解释（本次新增）
+
+`GET /api/v1/environments/{environment}/flags/{flagKey}/explain?marker=alpha&at=2026-01-01T05:00:00Z`
+
+输入：
+
+- 路径参数 `environment`、`flagKey`：目标环境与开关标识。
+- 查询参数 `marker`：用户标记（必填，需符合标记格式）。
+- 查询参数 `at`：历史时间点（RFC 3339，可选）；缺省时按服务当前时刻判定，提供时还原 `changed_at` 不晚于该时点的最后一条配置（同一时刻以写入顺序的最后一条为准）。
+
+判定顺序固定：无配置或最后版本为墓碑时 `reason` 为 `unconfigured`；否则 `enabled` 为 `false` 时为 `disabled`；窗口不覆盖判定时点时为 `window_inactive`；灰度未命中时为 `rollout_miss`；其余情况为 `enabled`。`at` 早于首条配置时同样返回 `unconfigured`，不会倒灌后续配置。
+
+```json
+{
+  "environment": "prod",
+  "flag_key": "checkout",
+  "marker": "alpha",
+  "evaluated_at": "2026-01-01T05:00:00Z",
+  "status": "on",
+  "reason": "enabled",
+  "config": {
+    "version": "cfg-…",
+    "enabled": true,
+    "percentage": 50,
+    "window": {"starts_at": null, "ends_at": null}
+  }
+}
+```
+
+`status` 只取 `on` / `off` / `unconfigured`；`config` 在无有效配置时为 `null`，有配置时含 `version`、`enabled`、`percentage`、`window`（空窗口端点为 `null`），`version` 可与变更历史中的记录对照。接口只查询不写历史；相同输入重复查询结果稳定。
+
+### 按历史时点还原配置并评估（既有行为）
 
 `GET /api/v1/environments/{environment}/evaluate-at?at=2026-01-01T05:00:00Z&marker=alpha`
 

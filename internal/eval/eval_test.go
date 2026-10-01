@@ -111,3 +111,42 @@ func TestEvaluatedStatuses(t *testing.T) {
 		t.Errorf("window ended = %v, want off", got)
 	}
 }
+
+func TestExplainedReasons(t *testing.T) {
+	cases := []struct {
+		name   string
+		cfg    *Configuration
+		at     int64
+		status Status
+		reason Reason
+	}{
+		{"unconfigured", nil, 0, StatusUnconfigured, ReasonUnconfigured},
+		{"disabled", &Configuration{FlagKey: "f", Enabled: false, Percentage: 100}, 0, StatusOff, ReasonDisabled},
+		{"window not started", &Configuration{FlagKey: "f", Enabled: true, Percentage: 100, Window: Window{StartsAt: ptr(10)}}, 5, StatusOff, ReasonWindowInactive},
+		{"window ended", &Configuration{FlagKey: "f", Enabled: true, Percentage: 100, Window: Window{EndsAt: ptr(10)}}, 10, StatusOff, ReasonWindowInactive},
+		{"rollout miss", &Configuration{FlagKey: "f", Enabled: true, Percentage: 0}, 0, StatusOff, ReasonRolloutMiss},
+		{"enabled", &Configuration{FlagKey: "f", Enabled: true, Percentage: 100}, 0, StatusOn, ReasonEnabled},
+	}
+	for _, tc := range cases {
+		status, reason := Explained("e", tc.cfg, "m", tc.at)
+		if status != tc.status || reason != tc.reason {
+			t.Errorf("%s: got (%v, %v), want (%v, %v)", tc.name, status, reason, tc.status, tc.reason)
+		}
+		if got := Evaluated("e", tc.cfg, "m", tc.at); got != tc.status {
+			t.Errorf("%s: Evaluated = %v, want %v (surfaces must agree)", tc.name, got, tc.status)
+		}
+	}
+}
+
+func TestExplainedDecisionOrder(t *testing.T) {
+	// Disabled wins over an inactive window and a rollout miss.
+	disabled := &Configuration{FlagKey: "f", Enabled: false, Percentage: 0, Window: Window{EndsAt: ptr(10)}}
+	if _, reason := Explained("e", disabled, "m", 20); reason != ReasonDisabled {
+		t.Errorf("disabled+inactive window+miss reason = %v, want disabled", reason)
+	}
+	// An inactive window wins over a rollout miss.
+	inactive := &Configuration{FlagKey: "f", Enabled: true, Percentage: 0, Window: Window{EndsAt: ptr(10)}}
+	if _, reason := Explained("e", inactive, "m", 20); reason != ReasonWindowInactive {
+		t.Errorf("inactive window+miss reason = %v, want window_inactive", reason)
+	}
+}
