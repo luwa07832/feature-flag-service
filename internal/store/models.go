@@ -8,8 +8,11 @@ type Environment struct {
 
 // Flag is a feature flag definition.
 type Flag struct {
-	Key       string
-	CreatedAt int64
+	Key         string
+	Description string
+	Labels      []string
+	CreatedAt   int64
+	UpdatedAt   int64
 }
 
 // ConfigRecord is one immutable configuration version. The history is

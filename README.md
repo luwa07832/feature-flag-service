@@ -51,8 +51,23 @@ go run .
 ### 管理面
 
 - `POST /api/v1/environments` —— 注册环境，请求体 `{"key":"prod"}`。
-- `POST /api/v1/flags` —— 注册功能开关，请求体 `{"key":"checkout"}`。
+- `POST /api/v1/flags` —— 注册功能开关，请求体 `{"key":"checkout"}`，可带可选的
+  `description` 与 `labels`：
+  ```json
+  {"key":"checkout","description":"支付链路","labels":["core","ui"]}
+  ```
+  `description` 去除首尾空白后为 1–512 个 Unicode 字符；`labels` 每个值匹配
+  `[a-z0-9_-]{1,32}`，合法重复值去重，去重后最多 20 个，按字典序返回。缺省时说明与
+  标签为空，且 `updated_at` 与 `created_at` 相同。响应返回 `key`、`description`、
+  `labels`、`created_at`、`updated_at`。
 - `GET /api/v1/flags` —— 列出全部开关标识。
+- `GET /api/v1/flags/{flagKey}` —— 返回一个开关的定义详情（字段同创建响应）。
+- `PUT /api/v1/flags/{flagKey}/definition` —— 整体替换开关定义，必须提供
+  `description` 与 `labels`；返回定义详情，`created_at` 不变、`updated_at` 更新，
+  不生成任何配置版本。
+- `GET /api/v1/flag-definitions` —— 检索开关定义。`q` 忽略大小写匹配 `key` 或
+  `description` 的子串（空白视为未提供）；可重复出现的 `label` 参数要求全部命中。
+  无条件时返回全部，结果按 `key` 升序，每项字段同定义详情。
 - `PUT /api/v1/environments/{environment}/flags/{flagKey}/config` —— 追加一个配置版本：
   ```json
   {"enabled":true,"percentage":50,"window":{"starts_at":"2026-01-01T03:00:00Z","ends_at":"2026-01-01T06:00:00Z"}}

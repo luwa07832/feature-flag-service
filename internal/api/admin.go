@@ -16,6 +16,12 @@ type createKeyRequest struct {
 	Key string `json:"key"`
 }
 
+type createFlagRequest struct {
+	Key         string    `json:"key"`
+	Description *string   `json:"description"`
+	Labels      *[]string `json:"labels"`
+}
+
 type putConfigRequest struct {
 	Enabled    bool    `json:"enabled"`
 	Percentage int     `json:"percentage"`
@@ -47,19 +53,20 @@ func createEnvironment(st *store.Store) gin.HandlerFunc {
 
 func createFlag(st *store.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		var req createKeyRequest
+		var req createFlagRequest
 		if !decodeStrict(c, &req) || !validKey(c, req.Key) {
 			return
 		}
-		flag, err := st.CreateFlag(req.Key)
+		description, labels, ok := definitionFields(c, req.Description, req.Labels, false)
+		if !ok {
+			return
+		}
+		flag, err := st.CreateFlag(req.Key, description, labels)
 		if err != nil {
 			writeStoreError(c, err)
 			return
 		}
-		c.JSON(http.StatusCreated, gin.H{
-			"key":        flag.Key,
-			"created_at": timeutil.Format(flag.CreatedAt),
-		})
+		c.JSON(http.StatusCreated, flagDetailJSON(*flag))
 	}
 }
 

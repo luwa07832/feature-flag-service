@@ -12,6 +12,9 @@ import (
 // KeyPattern is the published identifier grammar for environments and flags.
 var KeyPattern = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
 
+// LabelPattern is the published grammar for flag classification labels.
+var LabelPattern = regexp.MustCompile(`^[a-z0-9_-]{1,32}$`)
+
 // ErrorCode is the vocabulary of the single top-level error object every
 // entry returns.
 const (
@@ -50,5 +53,20 @@ func configJSON(r store.ConfigRecord) gin.H {
 		"window":      windowJSON(r.StartsAt, r.EndsAt),
 		"changed_at":  timeutil.Format(r.ChangedAt),
 		"tombstone":   r.Tombstone,
+	}
+}
+
+// flagDetailJSON renders a flag definition; labels are always an array.
+func flagDetailJSON(flag store.Flag) gin.H {
+	labels := flag.Labels
+	if labels == nil {
+		labels = []string{}
+	}
+	return gin.H{
+		"key":         flag.Key,
+		"description": flag.Description,
+		"labels":      labels,
+		"created_at":  timeutil.Format(flag.CreatedAt),
+		"updated_at":  timeutil.Format(flag.UpdatedAt),
 	}
 }

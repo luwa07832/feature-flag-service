@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 )
 
@@ -23,12 +24,18 @@ func (s *Store) CreateEnvironment(key string) (*Environment, error) {
 	return &Environment{Key: key, CreatedAt: createdAt}, nil
 }
 
-// CreateFlag registers a feature flag definition.
-func (s *Store) CreateFlag(key string) (*Flag, error) {
+// CreateFlag registers a feature flag definition. The description and labels
+// are validated and normalized by the caller; a freshly created flag has
+// updated_at equal to created_at.
+func (s *Store) CreateFlag(key, description string, labels []string) (*Flag, error) {
 	createdAt := s.Now()
-	_, err := s.db.Exec(
-		"INSERT INTO flags(key, created_at) VALUES(?, ?)",
-		key, createdAt,
+	encoded, err := encodeLabels(labels)
+	if err != nil {
+		return nil, err
+	}
+	_, err = s.db.Exec(
+		"INSERT INTO flags(key, created_at, updated_at, description, labels) VALUES(?, ?, ?, ?, ?)",
+		key, createdAt, createdAt, description, encoded,
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -36,7 +43,38 @@ func (s *Store) CreateFlag(key string) (*Flag, error) {
 		}
 		return nil, fmt.Errorf("insert flag: %w", err)
 	}
-	return &Flag{Key: key, CreatedAt: createdAt}, nil
+	return &Flag{
+		Key:         key,
+		Description: description,
+		Labels:      copyLabels(labels),
+		CreatedAt:   createdAt,
+		UpdatedAt:   createdAt,
+	}, nil
+}
+
+// ReplaceFlagDefinition overwrites a flag's description and labels and bumps
+// updated_at; created_at is untouched and no configuration version is
+// appended. It returns ErrNotFound when the flag does not exist.
+func (s *Store) ReplaceFlagDefinition(key, description string, labels []string) (*Flag, error) {
+	encoded, err := encodeLabels(labels)
+	if err != nil {
+		return nil, err
+	}
+	result, err := s.db.Exec(
+		"UPDATE flags SET description = ?, labels = ?, updated_at = ? WHERE key = ?",
+		description, encoded, s.Now(), key,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("update flag definition: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("update flag definition: %w", err)
+	}
+	if affected == 0 {
+		return nil, ErrNotFound
+	}
+	return s.GetFlag(key)
 }
 
 // PutConfigInput carries one configuration version to append.
@@ -159,4 +197,37 @@ func boolToInt(v bool) int {
 		return 1
 	}
 	return 0
+}
+
+// encodeLabels stores the label set as a JSON array; labels match
+// [a-z0-9_-]{1,32} so the encoding is unambiguous.
+func encodeLabels(labels []string) (string, error) {
+	raw, err := json.Marshal(copyLabels(labels))
+	if err != nil {
+		return "", fmt.Errorf("encode labels: %w", err)
+	}
+	return string(raw), nil
+}
+
+func decodeLabels(raw string) ([]string, error) {
+	labels := []string{}
+	if raw == "" {
+		return labels, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &labels); err != nil {
+		return nil, fmt.Errorf("decode labels: %w", err)
+	}
+	if labels == nil {
+		labels = []string{}
+	}
+	return labels, nil
+}
+
+func copyLabels(labels []string) []string {
+	if len(labels) == 0 {
+		return []string{}
+	}
+	copied := make([]string, len(labels))
+	copy(copied, labels)
+	return copied
 }

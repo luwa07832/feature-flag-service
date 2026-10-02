@@ -40,10 +40,58 @@ func OpenWithClock(path string, now func() time.Time) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := migrateFlagsTable(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate flags table: %w", err)
+	}
 	if now == nil {
 		now = time.Now
 	}
 	return &Store{db: db, now: now}, nil
+}
+
+// migrateFlagsTable upgrades databases created before flags carried a
+// definition (description, labels, updated_at). Fresh databases already have
+// the columns from schema, so every ALTER is conditional. Rows that predate
+// the upgrade start with an empty definition and updated_at = created_at.
+func migrateFlagsTable(db *sql.DB) error {
+	rows, err := db.Query("PRAGMA table_info(flags)")
+	if err != nil {
+		return fmt.Errorf("inspect flags table: %w", err)
+	}
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return fmt.Errorf("inspect flags table: %w", err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("inspect flags table: %w", err)
+	}
+	if !columns["description"] {
+		if _, err := db.Exec("ALTER TABLE flags ADD COLUMN description TEXT NOT NULL DEFAULT ''"); err != nil {
+			return fmt.Errorf("add flags.description: %w", err)
+		}
+	}
+	if !columns["labels"] {
+		if _, err := db.Exec("ALTER TABLE flags ADD COLUMN labels TEXT NOT NULL DEFAULT '[]'"); err != nil {
+			return fmt.Errorf("add flags.labels: %w", err)
+		}
+	}
+	if !columns["updated_at"] {
+		if _, err := db.Exec("ALTER TABLE flags ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return fmt.Errorf("add flags.updated_at: %w", err)
+		}
+	}
+	if _, err := db.Exec("UPDATE flags SET updated_at = created_at WHERE updated_at = 0"); err != nil {
+		return fmt.Errorf("backfill flags.updated_at: %w", err)
+	}
+	return nil
 }
 
 // Now returns the current time in the service's unified Unix-nanosecond
@@ -72,8 +120,11 @@ CREATE TABLE IF NOT EXISTS environments (
 	created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS flags (
-	key        TEXT PRIMARY KEY,
-	created_at INTEGER NOT NULL
+	key         TEXT PRIMARY KEY,
+	created_at  INTEGER NOT NULL,
+	description TEXT NOT NULL DEFAULT '',
+	labels      TEXT NOT NULL DEFAULT '[]',
+	updated_at  INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS config_history (
 	id          INTEGER PRIMARY KEY AUTOINCREMENT,

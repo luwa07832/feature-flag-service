@@ -23,20 +23,51 @@ func (s *Store) EnvironmentExists(environment string) (bool, error) {
 
 // ListFlags returns every registered flag definition ordered by key.
 func (s *Store) ListFlags() ([]Flag, error) {
-	rows, err := s.db.Query("SELECT key, created_at FROM flags ORDER BY key ASC")
+	rows, err := s.db.Query("SELECT key, description, labels, created_at, updated_at FROM flags ORDER BY key ASC")
 	if err != nil {
 		return nil, fmt.Errorf("list flags: %w", err)
 	}
 	defer rows.Close()
 	var flags []Flag
 	for rows.Next() {
-		var f Flag
-		if err := rows.Scan(&f.Key, &f.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan flag: %w", err)
+		flag, err := scanFlag(rows)
+		if err != nil {
+			return nil, err
 		}
-		flags = append(flags, f)
+		flags = append(flags, flag)
 	}
 	return flags, rows.Err()
+}
+
+// GetFlag returns one flag definition by key, or ErrNotFound when the flag
+// was never registered.
+func (s *Store) GetFlag(key string) (*Flag, error) {
+	row := s.db.QueryRow(
+		"SELECT key, description, labels, created_at, updated_at FROM flags WHERE key = ?",
+		key,
+	)
+	flag, err := scanFlag(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &flag, nil
+}
+
+func scanFlag(row rowScanner) (Flag, error) {
+	var flag Flag
+	var rawLabels string
+	if err := row.Scan(&flag.Key, &flag.Description, &rawLabels, &flag.CreatedAt, &flag.UpdatedAt); err != nil {
+		return Flag{}, fmt.Errorf("scan flag: %w", err)
+	}
+	labels, err := decodeLabels(rawLabels)
+	if err != nil {
+		return Flag{}, err
+	}
+	flag.Labels = labels
+	return flag, nil
 }
 
 // ConfigHistory returns the append-only version chain for one flag in one
