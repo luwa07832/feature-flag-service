@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 )
 
 // CreateEnvironment registers a deployment target. Unknown environments are
@@ -23,12 +24,26 @@ func (s *Store) CreateEnvironment(key string) (*Environment, error) {
 	return &Environment{Key: key, CreatedAt: createdAt}, nil
 }
 
-// CreateFlag registers a feature flag definition.
-func (s *Store) CreateFlag(key string) (*Flag, error) {
+// CreateFlagInput carries a feature flag definition at registration time.
+type CreateFlagInput struct {
+	Key         string
+	Description string
+	Labels      []string
+}
+
+// CreateFlag registers a feature flag definition. A new flag shares one
+// instant between created_at and updated_at.
+func (s *Store) CreateFlag(input CreateFlagInput) (*Flag, error) {
 	createdAt := s.Now()
-	_, err := s.db.Exec(
-		"INSERT INTO flags(key, created_at) VALUES(?, ?)",
-		key, createdAt,
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(
+		"INSERT INTO flags(key, description, created_at, updated_at) VALUES(?, ?, ?, ?)",
+		input.Key, input.Description, createdAt, createdAt,
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -36,7 +51,92 @@ func (s *Store) CreateFlag(key string) (*Flag, error) {
 		}
 		return nil, fmt.Errorf("insert flag: %w", err)
 	}
-	return &Flag{Key: key, CreatedAt: createdAt}, nil
+	input.Labels = normalizeLabels(input.Labels)
+	if err := replaceLabelsTx(tx, input.Key, input.Labels); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit flag: %w", err)
+	}
+	return &Flag{
+		Key:         input.Key,
+		Description: input.Description,
+		Labels:      append([]string(nil), input.Labels...),
+		CreatedAt:   createdAt,
+		UpdatedAt:   createdAt,
+	}, nil
+}
+
+// UpdateFlagDefinition replaces the description and labels of an existing
+// flag as a whole. created_at never moves; updated_at does. It never appends
+// configuration history. ErrNotFound is returned for an unknown flag.
+func (s *Store) UpdateFlagDefinition(flagKey, description string, labels []string) (*Flag, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var createdAt int64
+	err = tx.QueryRow("SELECT created_at FROM flags WHERE key = ?", flagKey).Scan(&createdAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lookup flag: %w", err)
+	}
+	updatedAt := s.Now()
+	if _, err := tx.Exec(
+		"UPDATE flags SET description = ?, updated_at = ? WHERE key = ?",
+		description, updatedAt, flagKey,
+	); err != nil {
+		return nil, fmt.Errorf("update flag: %w", err)
+	}
+	labels = normalizeLabels(labels)
+	if err := replaceLabelsTx(tx, flagKey, labels); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit flag update: %w", err)
+	}
+	return &Flag{
+		Key:         flagKey,
+		Description: description,
+		Labels:      append([]string(nil), labels...),
+		CreatedAt:   createdAt,
+		UpdatedAt:   updatedAt,
+	}, nil
+}
+
+func replaceLabelsTx(tx *sql.Tx, flagKey string, labels []string) error {
+	if _, err := tx.Exec("DELETE FROM flag_labels WHERE flag_key = ?", flagKey); err != nil {
+		return fmt.Errorf("clear labels: %w", err)
+	}
+	for _, label := range labels {
+		if _, err := tx.Exec(
+			"INSERT INTO flag_labels(flag_key, label) VALUES(?, ?)",
+			flagKey, label,
+		); err != nil {
+			return fmt.Errorf("insert label: %w", err)
+		}
+	}
+	return nil
+}
+
+// normalizeLabels deduplicates labels and returns them lexicographically
+// ordered so storage matches the published response shape.
+func normalizeLabels(labels []string) []string {
+	seen := make(map[string]struct{}, len(labels))
+	unique := make([]string, 0, len(labels))
+	for _, label := range labels {
+		if _, ok := seen[label]; ok {
+			continue
+		}
+		seen[label] = struct{}{}
+		unique = append(unique, label)
+	}
+	sort.Strings(unique)
+	return unique
 }
 
 // PutConfigInput carries one configuration version to append.

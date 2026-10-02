@@ -51,8 +51,20 @@ go run .
 ### 管理面
 
 - `POST /api/v1/environments` —— 注册环境，请求体 `{"key":"prod"}`。
-- `POST /api/v1/flags` —— 注册功能开关，请求体 `{"key":"checkout"}`。
-- `GET /api/v1/flags` —— 列出全部开关标识。
+- `POST /api/v1/flags` —— 注册功能开关，请求体 `{"key":"checkout"}`，可选带 `description` 与 `labels`：
+  - `description` 去除首尾空白后为 1–512 个 Unicode 字符；省略时为空。
+  - `labels` 每个值匹配 `[a-z0-9_-]{1,32}`，自动去重，最多 20 个，按字典序返回；省略时为空数组。
+  - 响应返回 `key`、`description`、`labels`、`created_at`、`updated_at`；新建开关 `updated_at` 与 `created_at` 相同。
+- `GET /api/v1/flags` —— 列出全部开关标识（仅标识数组，不含定义详情）。
+- `GET /api/v1/flags/{flagKey}` —— 返回单个开关的定义详情（同创建响应字段）；未知开关返回 404 `FlagNotFound`。
+- `PUT /api/v1/flags/{flagKey}/definition` —— 整体替换开关定义：
+  - 请求体必须同时提供 `description` 与 `labels`，并适用与创建相同的取值规则；不接受 `key` 字段。
+  - 替换成功后 `created_at` 不变、`updated_at` 更新，重复相同替换内容一致；不生成任何配置版本。
+  - 未知开关返回 404 `FlagNotFound`。
+- `GET /api/v1/flag-definitions` —— 开关定义文本检索（纯查询，不写入）：
+  - `q`：忽略大小写匹配 `key` 或 `description` 的子串；空白或省略视为未提供。
+  - `label`：可重复提供，多个标签必须同时命中（AND）；非法标签返回 400 `InvalidRequest`。
+  - 无条件时返回全部定义，按 `key` 升序；响应为 `{"definitions":[…]}`，每项与定义详情同形。
 - `PUT /api/v1/environments/{environment}/flags/{flagKey}/config` —— 追加一个配置版本：
   ```json
   {"enabled":true,"percentage":50,"window":{"starts_at":"2026-01-01T03:00:00Z","ends_at":"2026-01-01T06:00:00Z"}}

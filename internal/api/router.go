@@ -26,8 +26,11 @@ func NewRouter(st *store.Store) *gin.Engine {
 	v1 := router.Group("/api/v1")
 	{
 		v1.POST("/environments", createEnvironment(st))
-		v1.POST("/flags", createFlag(st))
+		v1.POST("/flags", createFlagDef(st))
 		v1.GET("/flags", listFlags(st))
+		v1.GET("/flags/:flagKey", getFlagDef(st))
+		v1.PUT("/flags/:flagKey/definition", putFlagDefinition(st))
+		v1.GET("/flag-definitions", searchFlagDefinitions(st))
 		v1.GET("/compare/:flagKey", compareFlags(st))
 		v1.GET("/environments/:environment/evaluate", evaluate(st))
 		v1.GET("/environments/:environment/evaluate-at", evaluateAt(st))

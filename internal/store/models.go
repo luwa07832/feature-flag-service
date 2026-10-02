@@ -6,10 +6,14 @@ type Environment struct {
 	CreatedAt int64
 }
 
-// Flag is a feature flag definition.
+// Flag is a feature flag definition. Description and labels are the editable
+// definition surface; they never append configuration history.
 type Flag struct {
-	Key       string
-	CreatedAt int64
+	Key         string
+	Description string
+	Labels      []string
+	CreatedAt   int64
+	UpdatedAt   int64
 }
 
 // ConfigRecord is one immutable configuration version. The history is

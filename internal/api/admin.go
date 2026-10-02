@@ -45,24 +45,6 @@ func createEnvironment(st *store.Store) gin.HandlerFunc {
 	}
 }
 
-func createFlag(st *store.Store) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		var req createKeyRequest
-		if !decodeStrict(c, &req) || !validKey(c, req.Key) {
-			return
-		}
-		flag, err := st.CreateFlag(req.Key)
-		if err != nil {
-			writeStoreError(c, err)
-			return
-		}
-		c.JSON(http.StatusCreated, gin.H{
-			"key":        flag.Key,
-			"created_at": timeutil.Format(flag.CreatedAt),
-		})
-	}
-}
-
 func putConfig(st *store.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		environment := c.Param("environment")

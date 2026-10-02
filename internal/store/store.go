@@ -40,6 +40,10 @@ func OpenWithClock(path string, now func() time.Time) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if now == nil {
 		now = time.Now
 	}
@@ -72,9 +76,20 @@ CREATE TABLE IF NOT EXISTS environments (
 	created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS flags (
-	key        TEXT PRIMARY KEY,
-	created_at INTEGER NOT NULL
+	key         TEXT PRIMARY KEY,
+	description TEXT NOT NULL DEFAULT '',
+	created_at  INTEGER NOT NULL,
+	updated_at  INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS flag_labels (
+	flag_key TEXT NOT NULL,
+	label    TEXT NOT NULL,
+	PRIMARY KEY(flag_key, label),
+	FOREIGN KEY(flag_key) REFERENCES flags(key)
+);
+CREATE INDEX IF NOT EXISTS idx_flag_labels_label
+	ON flag_labels(label, flag_key)
+;
 CREATE TABLE IF NOT EXISTS config_history (
 	id          INTEGER PRIMARY KEY AUTOINCREMENT,
 	flag_key    TEXT NOT NULL,
@@ -92,3 +107,45 @@ CREATE INDEX IF NOT EXISTS idx_config_env_time
 CREATE INDEX IF NOT EXISTS idx_config_flag_env_time
 	ON config_history(flag_key, environment, changed_at, id);
 `
+
+// migrate upgrades databases created before flag definitions carried
+// description, labels and updated_at.
+func migrate(db *sql.DB) error {
+	if err := ensureColumn(db, "flags", "description", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "flags", "updated_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if _, err := db.Exec("UPDATE flags SET updated_at = created_at WHERE updated_at = 0"); err != nil {
+		return fmt.Errorf("backfill updated_at: %w", err)
+	}
+	return nil
+}
+
+func ensureColumn(db *sql.DB, table, column, decl string) error {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("scan %s columns: %w", table, err)
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("scan %s columns: %w", table, err)
+	}
+	if _, err := db.Exec("ALTER TABLE " + table + " ADD COLUMN " + column + " " + decl); err != nil {
+		return fmt.Errorf("add %s.%s: %w", table, column, err)
+	}
+	return nil
+}

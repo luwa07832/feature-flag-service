@@ -161,7 +161,7 @@ func mustEnv(t *testing.T, st *Store, key string) {
 
 func mustFlag(t *testing.T, st *Store, key string) {
 	t.Helper()
-	if _, err := st.CreateFlag(key); err != nil {
+	if _, err := st.CreateFlag(CreateFlagInput{Key: key}); err != nil {
 		t.Fatalf("create flag: %v", err)
 	}
 }
