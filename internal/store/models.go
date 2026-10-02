@@ -30,3 +30,25 @@ type ConfigRecord struct {
 	ChangedAt   int64
 	Tombstone   bool
 }
+
+// DefinitionSnapshot is the editable definition surface captured at one
+// instant. Labels are stored in the history exactly as presented in
+// definition responses: deduplicated and lexicographically ordered.
+type DefinitionSnapshot struct {
+	Description string
+	Labels      []string
+}
+
+// DefinitionEvent is one append-only definition change. Before is nil for
+// the created action and populated for updated; after is always set. Events
+// are ordered by (ChangedAt, EventID), so EventID disambiguates events
+// produced within the same nanosecond.
+type DefinitionEvent struct {
+	EventID       int64
+	FlagKey       string
+	ChangedAt     int64
+	Action        string
+	ChangedFields []string
+	Before        *DefinitionSnapshot
+	After         *DefinitionSnapshot
+}

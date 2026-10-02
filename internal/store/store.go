@@ -36,6 +36,11 @@ func OpenWithClock(path string, now func() time.Time) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("enable wal: %w", err)
 	}
+	historyExisted, err := tableExists(db, "flag_definition_history")
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
@@ -43,6 +48,12 @@ func OpenWithClock(path string, now func() time.Time) (*Store, error) {
 	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, err
+	}
+	if !historyExisted {
+		if err := backfillDefinitionHistory(db); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	if now == nil {
 		now = time.Now
@@ -106,6 +117,18 @@ CREATE INDEX IF NOT EXISTS idx_config_env_time
 	ON config_history(environment, changed_at, id);
 CREATE INDEX IF NOT EXISTS idx_config_flag_env_time
 	ON config_history(flag_key, environment, changed_at, id);
+CREATE TABLE IF NOT EXISTS flag_definition_history (
+	event_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+	flag_key        TEXT NOT NULL,
+	changed_at      INTEGER NOT NULL,
+	action          TEXT NOT NULL,
+	changed_fields  TEXT NOT NULL,
+	before          TEXT,
+	after           TEXT NOT NULL,
+	FOREIGN KEY(flag_key) REFERENCES flags(key)
+);
+CREATE INDEX IF NOT EXISTS idx_def_history_flag_time
+	ON flag_definition_history(flag_key, changed_at, event_id);
 `
 
 // migrate upgrades databases created before flag definitions carried
@@ -146,6 +169,98 @@ func ensureColumn(db *sql.DB, table, column, decl string) error {
 	}
 	if _, err := db.Exec("ALTER TABLE " + table + " ADD COLUMN " + column + " " + decl); err != nil {
 		return fmt.Errorf("add %s.%s: %w", table, column, err)
+	}
+	return nil
+}
+
+// tableExists reports whether a table with the given name is present.
+func tableExists(db *sql.DB, table string) (bool, error) {
+	var name string
+	err := db.QueryRow(
+		"SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+		table,
+	).Scan(&name)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect tables: %w", err)
+	}
+	return true, nil
+}
+
+// backfillDefinitionHistory seeds one created event for every flag that
+// existed before definition history existed. It runs only when the history
+// table was just created, so it never fabricates updates or duplicates
+// events on later opens. Each event uses the flag's created_at and the
+// current definition as its after snapshot.
+func backfillDefinitionHistory(db *sql.DB) error {
+	rows, err := db.Query(
+		`SELECT key, description, created_at FROM flags
+		 ORDER BY created_at ASC, key ASC`,
+	)
+	if err != nil {
+		return fmt.Errorf("backfill definition history: %w", err)
+	}
+	type flagRow struct {
+		key         string
+		description string
+		createdAt   int64
+	}
+	var existing []flagRow
+	for rows.Next() {
+		var row flagRow
+		if err := rows.Scan(&row.key, &row.description, &row.createdAt); err != nil {
+			rows.Close()
+			return fmt.Errorf("backfill definition history: %w", err)
+		}
+		existing = append(existing, row)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("backfill definition history: %w", err)
+	}
+	rows.Close()
+
+	labels := make(map[string][]string)
+	labelRows, err := db.Query(
+		"SELECT flag_key, label FROM flag_labels ORDER BY flag_key ASC, label ASC",
+	)
+	if err != nil {
+		return fmt.Errorf("backfill definition history: %w", err)
+	}
+	for labelRows.Next() {
+		var flagKey, label string
+		if err := labelRows.Scan(&flagKey, &label); err != nil {
+			labelRows.Close()
+			return fmt.Errorf("backfill definition history: %w", err)
+		}
+		labels[flagKey] = append(labels[flagKey], label)
+	}
+	if err := labelRows.Err(); err != nil {
+		return fmt.Errorf("backfill definition history: %w", err)
+	}
+	labelRows.Close()
+
+	for _, row := range existing {
+		after, err := marshalSnapshot(DefinitionSnapshot{
+			Description: row.description,
+			Labels:      labels[row.key],
+		})
+		if err != nil {
+			return fmt.Errorf("backfill definition history: %w", err)
+		}
+		fields, err := marshalStringList(createdFields)
+		if err != nil {
+			return fmt.Errorf("backfill definition history: %w", err)
+		}
+		if _, err := db.Exec(
+			`INSERT INTO flag_definition_history
+				(flag_key, changed_at, action, changed_fields, before, after)
+			 VALUES(?, ?, 'created', ?, NULL, ?)`,
+			row.key, row.createdAt, fields, string(after),
+		); err != nil {
+			return fmt.Errorf("backfill definition history: %w", err)
+		}
 	}
 	return nil
 }

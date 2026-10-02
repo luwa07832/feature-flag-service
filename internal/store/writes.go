@@ -55,6 +55,16 @@ func (s *Store) CreateFlag(input CreateFlagInput) (*Flag, error) {
 	if err := replaceLabelsTx(tx, input.Key, input.Labels); err != nil {
 		return nil, err
 	}
+	after := &DefinitionSnapshot{
+		Description: input.Description,
+		Labels:      append([]string(nil), input.Labels...),
+	}
+	if err := insertDefinitionEventTx(
+		tx, input.Key, createdAt, DefinitionActionCreated,
+		append([]string(nil), createdFields...), nil, after,
+	); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit flag: %w", err)
 	}
@@ -69,7 +79,9 @@ func (s *Store) CreateFlag(input CreateFlagInput) (*Flag, error) {
 
 // UpdateFlagDefinition replaces the description and labels of an existing
 // flag as a whole. created_at never moves; updated_at does. It never appends
-// configuration history. ErrNotFound is returned for an unknown flag.
+// configuration history; the definition change is appended to the
+// append-only definition history in the same transaction. ErrNotFound is
+// returned for an unknown flag.
 func (s *Store) UpdateFlagDefinition(flagKey, description string, labels []string) (*Flag, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -78,12 +90,20 @@ func (s *Store) UpdateFlagDefinition(flagKey, description string, labels []strin
 	defer tx.Rollback()
 
 	var createdAt int64
-	err = tx.QueryRow("SELECT created_at FROM flags WHERE key = ?", flagKey).Scan(&createdAt)
+	var oldDescription string
+	err = tx.QueryRow(
+		"SELECT created_at, description FROM flags WHERE key = ?",
+		flagKey,
+	).Scan(&createdAt, &oldDescription)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("lookup flag: %w", err)
+	}
+	oldLabels, err := flagLabelsTx(tx, flagKey)
+	if err != nil {
+		return nil, err
 	}
 	updatedAt := s.Now()
 	if _, err := tx.Exec(
@@ -96,6 +116,22 @@ func (s *Store) UpdateFlagDefinition(flagKey, description string, labels []strin
 	if err := replaceLabelsTx(tx, flagKey, labels); err != nil {
 		return nil, err
 	}
+	before := &DefinitionSnapshot{
+		Description: oldDescription,
+		Labels:      oldLabels,
+	}
+	after := &DefinitionSnapshot{
+		Description: description,
+		Labels:      append([]string(nil), labels...),
+	}
+	// An identical replacement still refreshes updated_at and appends an
+	// updated event whose changed_fields is empty.
+	if err := insertDefinitionEventTx(
+		tx, flagKey, updatedAt, DefinitionActionUpdated,
+		definitionChangedFields(before, after), before, after,
+	); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit flag update: %w", err)
 	}
@@ -106,6 +142,31 @@ func (s *Store) UpdateFlagDefinition(flagKey, description string, labels []strin
 		CreatedAt:   createdAt,
 		UpdatedAt:   updatedAt,
 	}, nil
+}
+
+// flagLabelsTx reads one flag's labels inside a transaction in
+// lexicographic order.
+func flagLabelsTx(tx *sql.Tx, flagKey string) ([]string, error) {
+	rows, err := tx.Query(
+		"SELECT label FROM flag_labels WHERE flag_key = ? ORDER BY label ASC",
+		flagKey,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query labels: %w", err)
+	}
+	defer rows.Close()
+	found := make([]string, 0)
+	for rows.Next() {
+		var label string
+		if err := rows.Scan(&label); err != nil {
+			return nil, fmt.Errorf("scan label: %w", err)
+		}
+		found = append(found, label)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("query labels: %w", err)
+	}
+	return found, nil
 }
 
 func replaceLabelsTx(tx *sql.Tx, flagKey string, labels []string) error {

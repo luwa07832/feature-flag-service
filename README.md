@@ -59,8 +59,15 @@ go run .
 - `GET /api/v1/flags/{flagKey}` —— 返回单个开关的定义详情（同创建响应字段）；未知开关返回 404 `FlagNotFound`。
 - `PUT /api/v1/flags/{flagKey}/definition` —— 整体替换开关定义：
   - 请求体必须同时提供 `description` 与 `labels`，并适用与创建相同的取值规则；不接受 `key` 字段。
-  - 替换成功后 `created_at` 不变、`updated_at` 更新，重复相同替换内容一致；不生成任何配置版本。
+  - 替换成功后 `created_at` 不变、`updated_at` 更新，重复相同替换内容一致；不生成任何配置版本。创建与替换在同一事务内追加一条定义变更记录，失败请求不写入。
   - 未知开关返回 404 `FlagNotFound`。
+- `GET /api/v1/flags/{flagKey}/definition-history` —— 查询开关定义变更历史（本次新增，只读）：
+  - 查询参数 `from`、`to` 均可选，为带偏移量的 RFC 3339 时间戳；窗口半开：`from` 含、`to` 不含。显式提供但为空或不可解析、或 `from` 不早于 `to` 时返回 400 `InvalidTimestamp`。
+  - 响应固定为 `{"flag_key":"…","items":[…]}`，按 `changed_at` 升序、`event_id` 升序返回；每项含 `event_id`、`changed_at`、`action`、`changed_fields`、`before`、`after`。
+  - `action` 为 `created`（`before` 为 `null`，`changed_fields` 固定为 `["description","labels"]`）或 `updated`（`before`/`after` 为替换前后快照，`changed_fields` 只列实际变化项；相同内容替换也会产生一条空 `changed_fields` 的 `updated` 记录）。
+  - 快照形如 `{"description":"…","labels":[…]}`，`labels` 去重并按字典序排列；`changed_at` 等于创建响应的 `created_at` 或替换响应的 `updated_at`；`event_id` 为只增整数并决定同一时刻的顺序。
+  - 历史只追加且跨重启保留。升级前已存在的每个开关补一条 `created` 记录：`changed_at` 取 `created_at`，`after` 保存当前定义，不虚构旧修改。
+  - 无匹配返回 200 与空数组；重复查询不写入且结果一致。非法 `flagKey` 返回 400 `InvalidRequest`，未知开关返回 404 `FlagNotFound`。定义历史与配置历史相互独立，不能互相代替。
 - `GET /api/v1/flag-definitions` —— 开关定义文本检索（纯查询，不写入）：
   - `q`：忽略大小写匹配 `key` 或 `description` 的子串；空白或省略视为未提供。
   - `label`：可重复提供，多个标签必须同时命中（AND）；非法标签返回 400 `InvalidRequest`。
