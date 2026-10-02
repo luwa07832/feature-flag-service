@@ -61,6 +61,11 @@ go run .
   - 请求体必须同时提供 `description` 与 `labels`，并适用与创建相同的取值规则；不接受 `key` 字段。
   - 替换成功后 `created_at` 不变、`updated_at` 更新，重复相同替换内容一致；不生成任何配置版本。
   - 未知开关返回 404 `FlagNotFound`。
+- `POST /api/v1/flags` 与 `PUT /api/v1/flags/{flagKey}/definition` 成功时，在同一事务追加一条开关定义变更记录（定义历史独立于配置历史，配置版本的增删不会产生定义变更）：
+  - 创建记为 `created`：`before` 为 `null`，`after` 保存含 `description`、`labels`（去重排序）的快照，`changed_fields` 固定为 `["description","labels"]`，`changed_at` 等于响应的 `created_at`。
+  - 替换记为 `updated`：`before`、`after` 分别保存替换前后快照，`changed_at` 等于响应的 `updated_at`，`changed_fields` 按 `description`、`labels` 顺序只列实际变化项；内容完全相同的替换仍更新 `updated_at` 并追加一条 `changed_fields` 为空的 `updated` 记录。
+  - 失败请求不写入任何记录；定义历史只追加，跨重启保留。`event_id` 为只增整数，与 `changed_at` 共同决定顺序（先 `changed_at` 后 `event_id`）。
+  - 升级前已存在的开关在首次打开数据库时补一条 `created`：`changed_at` 取该开关的 `created_at`，`after` 为当前定义，不虚构任何旧修改。
 - `GET /api/v1/flag-definitions` —— 开关定义文本检索（纯查询，不写入）：
   - `q`：忽略大小写匹配 `key` 或 `description` 的子串；空白或省略视为未提供。
   - `label`：可重复提供，多个标签必须同时命中（AND）；非法标签返回 400 `InvalidRequest`。
@@ -184,6 +189,23 @@ go run .
 - `changed_fields` 按 `enabled`、`percentage`、`window.starts_at`、`window.ends_at` 固定顺序列出差异，`version` 不参与；仅一侧有配置时列出该侧非空字段，两边均无配置时为 `[]`。
 - `comparison` 仅取 `same`（两侧有效配置相同）、`different`（两侧有效配置不同）、`only_source`（仅来源有配置）、`only_target`（仅目标有配置）、`unconfigured_both`（两边均无配置）。
 - 提供 `marker` 时 `source_status`、`target_status` 按禁用、窗口、灰度顺序分别判定，返回 `on`、`off`、`unconfigured`（分桶仍以各自环境标识为输入）；未提供 `marker` 时两者均为 `not_evaluated`，`marker` 字段为 `null`。
+
+### 开关定义变更历史（本次新增）
+
+`GET /api/v1/flags/{flagKey}/definition-history`
+
+只读查询开关定义（`description` 与 `labels`）的追加变更链，不写入、不生成配置版本，相同输入重复查询结果一致。
+
+- 路径参数 `flagKey`：沿用开关标识规则；非法返回 400 `InvalidRequest`。
+- 查询参数 `from`、`to`（可选）：RFC 3339 时间戳，按 `changed_at` 过滤，`from` 含、`to` 不含；显式提供但为空或不可解析返回 400 `InvalidTimestamp`，同时给出且 `from` 不早于 `to` 同样返回 400 `InvalidTimestamp`。
+- 校验顺序固定为：`flagKey` → `from` → `to` → 开关存在；未知开关返回 404 `FlagNotFound`。
+- 无匹配（包括未知开关之外的所有空结果情形）返回 200，`items` 为空数组。
+
+响应顶层固定为 `flag_key`、`items`；结果按 `changed_at` 升序、同一时刻按 `event_id` 升序排列。每项含 `event_id`、`changed_at`、`action`、`changed_fields`、`before`、`after`：
+
+- `action` 仅为 `created` 或 `updated`；`before`、`after` 为含 `description`、`labels` 的定义快照或 `null`（`created` 的 `before` 为 `null`），`labels` 始终为数组。
+- `changed_fields` 按 `description`、`labels` 固定顺序：`created` 固定列出两项，`updated` 只列实际变化项，相同内容替换时为 `[]`。
+- 升级前已有开关的补录 `created` 与正常写入记录按同一规则返回，`changed_at` 即其 `created_at`。
 
 ## 错误约定
 

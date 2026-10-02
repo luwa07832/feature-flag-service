@@ -178,3 +178,83 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+func TestOpenBackfillsDefinitionHistoryForLegacyFlags(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := raw.Exec(`
+CREATE TABLE service_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE environments (key TEXT PRIMARY KEY, created_at INTEGER NOT NULL);
+CREATE TABLE flags (key TEXT PRIMARY KEY, created_at INTEGER NOT NULL);
+CREATE TABLE config_history (
+	id INTEGER PRIMARY KEY AUTOINCREMENT, flag_key TEXT NOT NULL, environment TEXT NOT NULL,
+	version TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL, percentage INTEGER NOT NULL,
+	starts_at INTEGER, ends_at INTEGER, changed_at INTEGER NOT NULL, tombstone INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO flags(key, created_at) VALUES('zeta', 70), ('alpha', 42);
+`); err != nil {
+		t.Fatalf("seed legacy: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw: %v", err)
+	}
+
+	migrated, err := OpenWithClock(path, func() time.Time { return time.Unix(0, 77_000_000_000) })
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer migrated.Close()
+
+	for _, tc := range []struct {
+		key       string
+		createdAt int64
+	}{
+		{"alpha", 42},
+		{"zeta", 70},
+	} {
+		records, err := migrated.DefinitionHistory(tc.key, nil, nil)
+		if err != nil {
+			t.Fatalf("history %s: %v", tc.key, err)
+		}
+		if len(records) != 1 {
+			t.Fatalf("%s: got %d records, want 1 backfilled created", tc.key, len(records))
+		}
+		record := records[0]
+		if record.Action != DefinitionActionCreated {
+			t.Fatalf("%s: action = %q, want created", tc.key, record.Action)
+		}
+		if record.ChangedAt != tc.createdAt {
+			t.Fatalf("%s: changed_at = %d, want created_at %d", tc.key, record.ChangedAt, tc.createdAt)
+		}
+		if record.Before != nil {
+			t.Fatalf("%s: before = %#v, want nil", tc.key, record.Before)
+		}
+		if record.After == nil || record.After.Description != "" || len(record.After.Labels) != 0 {
+			t.Fatalf("%s: after = %#v, want current empty definition", tc.key, record.After)
+		}
+		if !equalStrings(record.ChangedFields, []string{"description", "labels"}) {
+			t.Fatalf("%s: changed_fields = %v", tc.key, record.ChangedFields)
+		}
+	}
+
+	// Reopening is a no-op: backfill stays append-only and never duplicates.
+	if err := migrated.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	reopened, err := OpenWithClock(path, func() time.Time { return time.Unix(0, 77_000_000_000) })
+	if err != nil {
+		t.Fatalf("second reopen: %v", err)
+	}
+	defer reopened.Close()
+	records, err := reopened.DefinitionHistory("alpha", nil, nil)
+	if err != nil {
+		t.Fatalf("history after reopen: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("got %d records after second open, backfill must not repeat", len(records))
+	}
+}

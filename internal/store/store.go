@@ -106,6 +106,19 @@ CREATE INDEX IF NOT EXISTS idx_config_env_time
 	ON config_history(environment, changed_at, id);
 CREATE INDEX IF NOT EXISTS idx_config_flag_env_time
 	ON config_history(flag_key, environment, changed_at, id);
+CREATE TABLE IF NOT EXISTS flag_definition_history (
+	event_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+	flag_key       TEXT NOT NULL,
+	action         TEXT NOT NULL,
+	changed_fields TEXT NOT NULL,
+	before_desc    TEXT,
+	before_labels  TEXT,
+	after_desc     TEXT,
+	after_labels   TEXT,
+	changed_at     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_flag_def_history_flag_time
+	ON flag_definition_history(flag_key, changed_at, event_id);
 `
 
 // migrate upgrades databases created before flag definitions carried
@@ -119,6 +132,77 @@ func migrate(db *sql.DB) error {
 	}
 	if _, err := db.Exec("UPDATE flags SET updated_at = created_at WHERE updated_at = 0"); err != nil {
 		return fmt.Errorf("backfill updated_at: %w", err)
+	}
+	if err := backfillDefinitionHistory(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+// backfillDefinitionHistory gives every flag that predates definition
+// history exactly one synthetic created record. changed_at uses the flag's
+// created_at and after holds its current definition; no subsequent edits are
+// invented. It is a no-op once a flag already has any history, so reopening
+// an upgraded database stays append-only.
+func backfillDefinitionHistory(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin definition backfill: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(
+		`SELECT f.key, f.description, f.created_at
+		 FROM flags f
+		 WHERE NOT EXISTS (
+			SELECT 1 FROM flag_definition_history h WHERE h.flag_key = f.key
+		 )
+		 ORDER BY f.key ASC`,
+	)
+	if err != nil {
+		return fmt.Errorf("query flags lacking definition history: %w", err)
+	}
+	type legacyFlag struct {
+		key, description string
+		createdAt        int64
+	}
+	var legacy []legacyFlag
+	for rows.Next() {
+		var lf legacyFlag
+		if err := rows.Scan(&lf.key, &lf.description, &lf.createdAt); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan legacy flag: %w", err)
+		}
+		legacy = append(legacy, lf)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close legacy flags: %w", err)
+	}
+
+	for _, lf := range legacy {
+		labels, err := flagLabelsTx(tx, lf.key)
+		if err != nil {
+			return err
+		}
+		labelsJSON, err := encodeLabels(labels)
+		if err != nil {
+			return err
+		}
+		fieldsJSON, err := encodeFields([]string{"description", "labels"})
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO flag_definition_history
+				(flag_key, action, changed_fields, before_desc, before_labels, after_desc, after_labels, changed_at)
+			 VALUES(?, 'created', ?, NULL, NULL, ?, ?, ?)`,
+			lf.key, fieldsJSON, lf.description, labelsJSON, lf.createdAt,
+		); err != nil {
+			return fmt.Errorf("backfill definition history: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit definition backfill: %w", err)
 	}
 	return nil
 }

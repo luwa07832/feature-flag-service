@@ -30,6 +30,7 @@ func NewRouter(st *store.Store) *gin.Engine {
 		v1.GET("/flags", listFlags(st))
 		v1.GET("/flags/:flagKey", getFlagDef(st))
 		v1.PUT("/flags/:flagKey/definition", putFlagDefinition(st))
+		v1.GET("/flags/:flagKey/definition-history", getDefinitionHistory(st))
 		v1.GET("/flag-definitions", searchFlagDefinitions(st))
 		v1.GET("/compare/:flagKey", compareFlags(st))
 		v1.GET("/environments/:environment/evaluate", evaluate(st))

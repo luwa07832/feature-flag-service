@@ -55,6 +55,16 @@ func (s *Store) CreateFlag(input CreateFlagInput) (*Flag, error) {
 	if err := replaceLabelsTx(tx, input.Key, input.Labels); err != nil {
 		return nil, err
 	}
+	after := &FlagDefinitionSnapshot{
+		Description: input.Description,
+		Labels:      append([]string(nil), input.Labels...),
+	}
+	if err := insertDefinitionRecordTx(
+		tx, input.Key, DefinitionActionCreated,
+		[]string{"description", "labels"}, nil, after, createdAt,
+	); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit flag: %w", err)
 	}
@@ -78,12 +88,18 @@ func (s *Store) UpdateFlagDefinition(flagKey, description string, labels []strin
 	defer tx.Rollback()
 
 	var createdAt int64
-	err = tx.QueryRow("SELECT created_at FROM flags WHERE key = ?", flagKey).Scan(&createdAt)
+	var oldDescription string
+	err = tx.QueryRow("SELECT created_at, description FROM flags WHERE key = ?", flagKey).
+		Scan(&createdAt, &oldDescription)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("lookup flag: %w", err)
+	}
+	oldLabels, err := flagLabelsTx(tx, flagKey)
+	if err != nil {
+		return nil, err
 	}
 	updatedAt := s.Now()
 	if _, err := tx.Exec(
@@ -96,6 +112,20 @@ func (s *Store) UpdateFlagDefinition(flagKey, description string, labels []strin
 	if err := replaceLabelsTx(tx, flagKey, labels); err != nil {
 		return nil, err
 	}
+	before := &FlagDefinitionSnapshot{
+		Description: oldDescription,
+		Labels:      oldLabels,
+	}
+	after := &FlagDefinitionSnapshot{
+		Description: description,
+		Labels:      append([]string(nil), labels...),
+	}
+	if err := insertDefinitionRecordTx(
+		tx, flagKey, DefinitionActionUpdated,
+		definitionChangedFields(before, after), before, after, updatedAt,
+	); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit flag update: %w", err)
 	}
@@ -106,6 +136,32 @@ func (s *Store) UpdateFlagDefinition(flagKey, description string, labels []strin
 		CreatedAt:   createdAt,
 		UpdatedAt:   updatedAt,
 	}, nil
+}
+
+// definitionChangedFields lists the definition fields that actually differ,
+// in the fixed description-before-labels order. An identical replacement
+// still appends an updated record, with an empty field list.
+func definitionChangedFields(before, after *FlagDefinitionSnapshot) []string {
+	fields := make([]string, 0, 2)
+	if before.Description != after.Description {
+		fields = append(fields, "description")
+	}
+	if !equalLabelSets(before.Labels, after.Labels) {
+		fields = append(fields, "labels")
+	}
+	return fields
+}
+
+func equalLabelSets(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func replaceLabelsTx(tx *sql.Tx, flagKey string, labels []string) error {

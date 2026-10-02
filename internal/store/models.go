@@ -30,3 +30,23 @@ type ConfigRecord struct {
 	ChangedAt   int64
 	Tombstone   bool
 }
+
+// FlagDefinitionSnapshot captures the editable definition surface
+// (description plus the deduplicated, sorted labels) at one point in time.
+type FlagDefinitionSnapshot struct {
+	Description string
+	Labels      []string
+}
+
+// FlagDefinitionRecord is one immutable flag-definition change. The history
+// is append-only and distinct from configuration history: definition edits
+// never create configuration versions and vice versa.
+type FlagDefinitionRecord struct {
+	EventID       int64
+	FlagKey       string
+	Action        string
+	ChangedFields []string
+	Before        *FlagDefinitionSnapshot
+	After         *FlagDefinitionSnapshot
+	ChangedAt     int64
+}
