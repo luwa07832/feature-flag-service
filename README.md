@@ -134,6 +134,24 @@ go run .
 
 校验顺序固定为：路径参数 → `at` → `marker` → 环境 → 开关。不合法路径返回 400 `InvalidRequest`，未知环境返回 404 `EnvironmentNotFound`，未知开关返回 404 `FlagNotFound`；其他服务错误沿用统一的单个 `error` 对象。
 
+### 跨开关变更审计（本次新增）
+
+`GET /api/v1/environments/{environment}/changes?flagKey=checkout&from=2026-01-01T00:00:00Z&to=2026-02-01T00:00:00Z`
+
+按变更顺序审计一个环境内全部（或单个）开关的配置变更，是纯查询：不追加任何变更记录，相同输入重复查询结果完全相同。
+
+- 路径参数 `environment`：目标环境标识，非法返回 400 `InvalidRequest`。
+- `flagKey`（可选）：设置后只查该开关；非法返回 400 `InvalidRequest`（不与 `FlagNotFound` 混淆），未知开关返回 404 `FlagNotFound`。
+- `from`、`to`（可选）：RFC 3339，按 `changed_at` 过滤，`from` 含、`to` 不含；为空或非法返回 400 `InvalidTimestamp`，同时给出且 `from` 不早于 `to` 同样返回 400 `InvalidTimestamp`。
+- 校验顺序固定为：路径参数 → `from` → `to` → `flagKey` → 环境 → 开关；未知环境返回 404 `EnvironmentNotFound`。
+- 结果按 `changed_at` 升序，同一时刻按写入先后排列；无匹配变更时仍返回 200，`items` 为空数组。
+
+响应顶层固定含 `environment`、`items`。每项含 `flag_key`、`version`、`changed_at`、`action`、`changed_fields`、`before`、`after`：
+
+- `action` 仅为 `created`、`updated`、`deleted`：无前序有效配置或前序为墓碑时出现的新有效配置记为 `created`；两个连续有效配置之间记为 `updated`；墓碑记为 `deleted`。`from`/`to` 只影响输出范围，动作判定始终基于完整追加链。
+- `before`、`after` 为配置对象或 `null`，配置对象含 `enabled`、`percentage`、`window`，`window` 含 `starts_at`、`ends_at`，空端点为 `null`；`created` 的 `before` 与 `deleted` 的 `after` 为 `null`。
+- `changed_fields` 按 `enabled`、`percentage`、`window.starts_at`、`window.ends_at` 固定顺序：`created` 列非空字段，`updated` 列变化字段，`deleted` 列删除前非空字段。
+
 ## 错误约定
 
 所有错误响应都是单个顶层 `error` 对象，包含 `code` 与 `message` 两个字符串字段；`message` 不包含 SQL、堆栈或文件路径。
@@ -142,7 +160,7 @@ go run .
 
 | HTTP | code | 触发条件 |
 |---|---|---|
-| 400 | `InvalidTimestamp` | `at`（或配置窗口）时间戳缺失或无法按 RFC 3339 解析 |
+| 400 | `InvalidTimestamp` | `at`、`from`、`to`（或配置窗口）时间戳缺失或无法按 RFC 3339 解析；变更审计中 `from` 不早于 `to` |
 | 400 | `InvalidMarker` | `marker` 不符合标记格式（实时评估缺失标记同样返回此码） |
 | 404 | `EnvironmentNotFound` | 环境不存在，或该环境在 `at` 时点没有任何可还原的有效配置 |
 

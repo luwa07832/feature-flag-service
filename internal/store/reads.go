@@ -64,6 +64,36 @@ func (s *Store) ConfigHistory(flagKey, environment string) ([]ConfigRecord, erro
 	return records, rows.Err()
 }
 
+// EnvironmentChanges returns the append-only version chains across every flag
+// in environment, oldest first by (changed_at, insertion order), including
+// tombstone records. When flagKey is non-empty the result is limited to that
+// flag; callers are responsible for validating identifiers and existence.
+func (s *Store) EnvironmentChanges(environment, flagKey string) ([]ConfigRecord, error) {
+	query := `SELECT flag_key, environment, version, enabled, percentage, starts_at, ends_at, changed_at, tombstone
+		 FROM config_history
+		 WHERE environment = ?`
+	args := []any{environment}
+	if flagKey != "" {
+		query += " AND flag_key = ?"
+		args = append(args, flagKey)
+	}
+	query += " ORDER BY changed_at ASC, id ASC"
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query environment changes: %w", err)
+	}
+	defer rows.Close()
+	var records []ConfigRecord
+	for rows.Next() {
+		record, err := scanConfig(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
 // EffectiveConfigsAt restores the latest configuration record per flag within
 // environment as of at. Selection rule: for each flag the last record whose
 // changed_at is not later than at (ties broken by insertion order). The
