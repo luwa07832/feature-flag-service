@@ -134,6 +134,40 @@ go run .
 
 校验顺序固定为：路径参数 → `at` → `marker` → 环境 → 开关。不合法路径返回 400 `InvalidRequest`，未知环境返回 404 `EnvironmentNotFound`，未知开关返回 404 `FlagNotFound`；其他服务错误沿用统一的单个 `error` 对象。
 
+### 跨开关变更审计（本次新增）
+
+`GET /api/v1/environments/{environment}/changes`
+
+按时间升序返回该环境下全部开关的配置变更审计流；同一时刻的变更按写入先后排列。查询为纯只读，不追加任何变更记录，相同查询重复执行结果完全相同。
+
+输入（均为查询参数，皆可省略）：
+
+- `flagKey`：只审计该开关；省略时审计环境内全部开关。
+- `from`：只含 `changed_at >= from` 的变更（含边界）。
+- `to`：只含 `changed_at < to` 的变更（不含边界）；与 `from` 同给时 `from` 必须早于 `to`。
+
+响应顶层固定含 `environment` 与 `items`；无匹配变更时 `items` 为空数组。每个元素：
+
+```json
+{
+  "flag_key": "checkout",
+  "version": "cfg-…",
+  "changed_at": "2026-01-01T03:00:00Z",
+  "action": "updated",
+  "changed_fields": ["percentage", "window.starts_at"],
+  "before": {"enabled":true,"percentage":10,
+             "window":{"starts_at":null,"ends_at":null}},
+  "after": {"enabled":true,"percentage":50,
+            "window":{"starts_at":"2026-01-01T04:00:00Z","ends_at":null}}
+}
+```
+
+- `action` 只使用 `created`、`updated`、`deleted`：无前序有效配置或前序为墓碑时，新有效配置记为 `created`；连续有效配置之间记为 `updated`；墓碑记为 `deleted`。动作按该开关自身的完整历史判定，不受 `from`/`to` 过滤影响。
+- `before`、`after` 是配置快照（含 `enabled`、`percentage`、`window`，空窗口端点为 `null`）或 `null`；`created` 的 `before` 与 `deleted` 的 `after` 恒为 `null`。
+- `changed_fields` 按 `enabled`、`percentage`、`window.starts_at`、`window.ends_at` 的固定顺序列出：`created` 列新配置的非空字段，`updated` 列发生变化的字段，`deleted` 列删除前配置的非空字段。
+
+校验顺序固定为：路径参数 → `from` → `to` → `flagKey`。路径标识或 `flagKey` 不合法返回 400 `InvalidRequest`（非法 `flagKey` 不会返回 `FlagNotFound`）；`from`/`to` 无法解析或 `from` 不早于 `to` 返回 400 `InvalidTimestamp`；未知环境返回 404 `EnvironmentNotFound`；带 `flagKey` 且开关未注册返回 404 `FlagNotFound`。
+
 ## 错误约定
 
 所有错误响应都是单个顶层 `error` 对象，包含 `code` 与 `message` 两个字符串字段；`message` 不包含 SQL、堆栈或文件路径。

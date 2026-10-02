@@ -159,6 +159,42 @@ func mustEnv(t *testing.T, st *Store, key string) {
 	}
 }
 
+func TestEnvironmentConfigHistoryOrdersAcrossFlags(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	st, clock := openAt(t, base)
+	mustEnv(t, st, "prod")
+	mustEnv(t, st, "staging")
+	mustFlag(t, st, "checkout")
+	mustFlag(t, st, "coupon")
+
+	clock.advance(base.Add(1 * time.Hour))
+	mustPut(t, st, "coupon", "prod", true, 100)
+	// Same instant as the coupon write: insertion order breaks the tie.
+	mustPut(t, st, "checkout", "prod", true, 10)
+	clock.advance(base.Add(2 * time.Hour))
+	mustPut(t, st, "checkout", "staging", true, 50)
+
+	records, err := st.EnvironmentConfigHistory("prod", "")
+	if err != nil {
+		t.Fatalf("environment history: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("records len = %d, want 2 (staging write excluded)", len(records))
+	}
+	if records[0].FlagKey != "coupon" || records[1].FlagKey != "checkout" {
+		t.Fatalf("tie order = %s,%s, want coupon,checkout (insertion order)",
+			records[0].FlagKey, records[1].FlagKey)
+	}
+
+	onlyCheckout, err := st.EnvironmentConfigHistory("prod", "checkout")
+	if err != nil {
+		t.Fatalf("environment history filtered: %v", err)
+	}
+	if len(onlyCheckout) != 1 || onlyCheckout[0].FlagKey != "checkout" {
+		t.Fatalf("filtered records = %#v, want the single checkout record", onlyCheckout)
+	}
+}
+
 func mustFlag(t *testing.T, st *Store, key string) {
 	t.Helper()
 	if _, err := st.CreateFlag(key); err != nil {
