@@ -28,6 +28,7 @@ func NewRouter(st *store.Store) *gin.Engine {
 		v1.POST("/environments", createEnvironment(st))
 		v1.POST("/flags", createFlag(st))
 		v1.GET("/flags", listFlags(st))
+		v1.GET("/compare/:flagKey", compareFlag(st))
 		v1.GET("/environments/:environment/evaluate", evaluate(st))
 		v1.GET("/environments/:environment/evaluate-at", evaluateAt(st))
 		v1.GET("/environments/:environment/changes", getChanges(st))

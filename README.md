@@ -152,6 +152,27 @@ go run .
 - `before`、`after` 为配置对象或 `null`，配置对象含 `enabled`、`percentage`、`window`，`window` 含 `starts_at`、`ends_at`，空端点为 `null`；`created` 的 `before` 与 `deleted` 的 `after` 为 `null`。
 - `changed_fields` 按 `enabled`、`percentage`、`window.starts_at`、`window.ends_at` 固定顺序：`created` 列非空字段，`updated` 列变化字段，`deleted` 列删除前非空字段。
 
+### 单开关跨环境同刻对比（本次新增）
+
+`GET /api/v1/compare/{flagKey}?source=prod&target=staging&at=2026-01-01T05:00:00Z&marker=alpha`
+
+对一个开关在两个环境的同一历史时点做配置对比与标记判定，是纯查询：不追加任何变更记录，相同输入重复查询结果完全相同。
+
+- 路径参数 `flagKey`：开关标识，沿用 `^[a-z0-9_-]{1,64}$`，非法返回 400 `InvalidRequest`。
+- `source`、`target`（必填）：两个不同的环境标识；缺失、非法或两者相同均返回 400 `InvalidRequest`。
+- `at`（必填）：历史时间点（RFC 3339），缺失或非法返回 400 `InvalidTimestamp`。
+- `marker`（可选）：用户标记，沿用标记格式，非法返回 400 `InvalidMarker`。
+- 校验顺序固定为：`flagKey` → `source`/`target` → `at` → `marker` → source 环境 → target 环境 → 开关；未知环境返回 404 `EnvironmentNotFound`，未知开关返回 404 `FlagNotFound`。
+- 版本选择规则：两侧各自选择 `changed_at <= at` 的最后一条记录（同一时刻以写入顺序的最后一条为准）；最后一条是墓碑或此前没有任何记录时，该侧视为无有效配置（`null`），不倒灌后续配置。
+
+响应顶层固定包含 `source`、`target`、`flag_key`、`at`、`marker`、`changed_fields`、`comparison`、`source_status`、`target_status`：
+
+- `source`、`target` 为配置对象或 `null`；配置对象含 `version`、`enabled`、`percentage`、`window`，`window` 含 `starts_at`、`ends_at`，空端点为 `null`。
+- `changed_fields` 按 `enabled`、`percentage`、`window.starts_at`、`window.ends_at` 固定顺序列出差异，`version` 不参与：两侧都有配置时列变化字段；仅一侧有配置时列该侧非空字段；两边均无配置时为 `[]`。
+- `comparison` 仅使用 `same`、`different`、`only_source`、`only_target`、`unconfigured_both`，依次表示两侧配置相同、不同、仅来源有配置、仅目标有配置、两边均无配置。
+- 提供 `marker` 时两侧状态各自按固定判定顺序（禁用 → 窗口 → 灰度）返回 `on`、`off` 或 `unconfigured`；缺省 `marker` 时 `source_status` 与 `target_status` 统一为 `not_evaluated`。
+- `at` 以统一的绝对时刻解释，响应中回显为规范 RFC 3339 UTC 字符串。
+
 ## 错误约定
 
 所有错误响应都是单个顶层 `error` 对象，包含 `code` 与 `message` 两个字符串字段；`message` 不包含 SQL、堆栈或文件路径。
