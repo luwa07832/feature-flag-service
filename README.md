@@ -76,6 +76,15 @@ go run .
   ```
   `window` 整体或其中任一端点可省略。响应返回新配置版本（含 `version` 与 `changed_at`）。
 - `DELETE /api/v1/environments/{environment}/flags/{flagKey}/config` —— 对当前配置追加墓碑记录。
+- `POST /api/v1/environments/{environment}/flags/{flagKey}/config/conditional` —— 并发安全的条件配置替换（本次新增）：
+  ```json
+  {"expected_version":"cfg-…","enabled":true,"percentage":50,"window":{"starts_at":"2026-01-01T03:00:00Z","ends_at":"2026-01-01T06:00:00Z"}}
+  ```
+  - 请求体必须提供 `expected_version`、`enabled`、`percentage`，`window` 可省略；`enabled`、`percentage`、`window` 的类型、取值与 RFC 3339 时间语义同 `PUT …/config`。
+  - `expected_version` 只接受字符串或 `null`：字符串为读取到的当前有效配置版本，`null` 表示当前无有效配置（从未写入或最新记录为墓碑；墓碑版本不算有效版本）。
+  - 仅当 `expected_version` 与执行时的当前有效配置版本一致时，才追加一个不可变的新配置版本并以 201 返回（形状同 PUT 响应）；不一致返回 409 `VersionConflict`，不追加任何记录。
+  - 并发提交相同 `expected_version` 时最多一个请求成功，其余得到 409 `VersionConflict`；无竞争时重复提交生成不同版本，只有最新版本影响当前状态。
+  - 校验顺序固定为：标识 → 请求体 → 环境 → 开关 → 版本比对；新版本立即参与配置历史、环境变更、实时评估、历史时点评估、解释与跨环境对比。
 
 ### 实时评估（既有行为）
 
@@ -219,4 +228,4 @@ go run .
 | 400 | `InvalidMarker` | `marker` 不符合标记格式（实时评估缺失标记同样返回此码） |
 | 404 | `EnvironmentNotFound` | 环境不存在，或该环境在 `at` 时点没有任何可还原的有效配置 |
 
-其他错误码：`InvalidRequest`（请求体或参数不合法）、`FlagNotFound`（开关不存在或无可删除配置）、`AlreadyExists`（重复创建）、`route_not_found`（路径无匹配）、`internal_error`（服务内部故障）、`storage_unavailable`（健康检查发现存储不可用）。
+其他错误码：`InvalidRequest`（请求体或参数不合法）、`FlagNotFound`（开关不存在或无可删除配置）、`AlreadyExists`（重复创建）、`VersionConflict`（条件替换的期望版本与当前有效配置版本不一致）、`route_not_found`（路径无匹配）、`internal_error`（服务内部故障）、`storage_unavailable`（健康检查发现存储不可用）。

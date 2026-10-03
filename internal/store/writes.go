@@ -208,6 +208,9 @@ type PutConfigInput struct {
 // PutConfig appends a new immutable configuration version for flag+environment.
 // Nothing existing is modified or deleted.
 func (s *Store) PutConfig(input PutConfigInput) (*ConfigRecord, error) {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
@@ -251,6 +254,9 @@ func (s *Store) PutConfig(input PutConfigInput) (*ConfigRecord, error) {
 // DeleteConfig appends a tombstone for the current flag+environment
 // configuration. It returns ErrNotFound when no live configuration exists.
 func (s *Store) DeleteConfig(flagKey, environment string) (*ConfigRecord, error) {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
@@ -291,6 +297,86 @@ func (s *Store) DeleteConfig(flagKey, environment string) (*ConfigRecord, error)
 		return nil, fmt.Errorf("commit tombstone: %w", err)
 	}
 	return &tombstone, nil
+}
+
+// PutConfigConditionalInput carries one compare-and-swap configuration
+// append: the write only happens when the current effective version matches.
+type PutConfigConditionalInput struct {
+	FlagKey     string
+	Environment string
+	// ExpectedVersion is the caller's view of the current effective
+	// configuration version; nil means the caller expects no effective
+	// configuration (no records yet, or a tombstone on top).
+	ExpectedVersion *string
+	Enabled         bool
+	Percentage      int
+	StartsAt        *int64
+	EndsAt          *int64
+}
+
+// PutConfigConditional appends a new immutable configuration version only
+// when ExpectedVersion matches the current effective version at execution
+// time. The check and the append run inside the serialized configuration
+// write path, so concurrent submissions with the same expected version let
+// at most one succeed; the rest fail with ErrVersionConflict and append
+// nothing.
+func (s *Store) PutConfigConditional(input PutConfigConditionalInput) (*ConfigRecord, error) {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	current, err := latestRecordTx(tx, input.FlagKey, input.Environment, s.Now())
+	if err != nil {
+		return nil, err
+	}
+	var currentVersion *string
+	if current != nil && !current.Tombstone {
+		version := current.Version
+		currentVersion = &version
+	}
+	if !sameOptionalVersion(currentVersion, input.ExpectedVersion) {
+		return nil, ErrVersionConflict
+	}
+
+	changedAt := s.Now()
+	record := ConfigRecord{
+		FlagKey:     input.FlagKey,
+		Environment: input.Environment,
+		Version:     s.newVersion(changedAt),
+		Enabled:     input.Enabled,
+		Percentage:  input.Percentage,
+		StartsAt:    input.StartsAt,
+		EndsAt:      input.EndsAt,
+		ChangedAt:   changedAt,
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO config_history
+			(flag_key, environment, version, enabled, percentage, starts_at, ends_at, changed_at, tombstone)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+		record.FlagKey, record.Environment, record.Version,
+		boolToInt(record.Enabled), record.Percentage,
+		record.StartsAt, record.EndsAt, record.ChangedAt,
+	); err != nil {
+		return nil, fmt.Errorf("insert config: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit config: %w", err)
+	}
+	return &record, nil
+}
+
+// sameOptionalVersion compares two optional version identifiers; a nil side
+// means "no effective configuration".
+func sameOptionalVersion(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // newVersion builds a unique, time-ordered configuration version identifier.

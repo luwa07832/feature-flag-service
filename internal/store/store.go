@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -15,6 +16,9 @@ import (
 type Store struct {
 	db  *sql.DB
 	now func() time.Time
+	// configMu serializes configuration writes so a conditional append's
+	// read-check-insert is atomic against every other configuration write.
+	configMu sync.Mutex
 	// versionSeq disambiguates configuration versions created within the same
 	// nanosecond. Configuration history is append-only.
 	versionSeq atomic.Uint64
@@ -65,6 +69,10 @@ var ErrNotFound = errors.New("not found")
 
 // ErrAlreadyExists reports a create request for an existing key.
 var ErrAlreadyExists = errors.New("already exists")
+
+// ErrVersionConflict reports a conditional write whose expected version does
+// not match the current effective configuration version at execution time.
+var ErrVersionConflict = errors.New("version conflict")
 
 const schema = `
 CREATE TABLE IF NOT EXISTS service_metadata (

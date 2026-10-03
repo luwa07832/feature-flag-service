@@ -21,6 +21,7 @@ const (
 	codeAlreadyExists       = "AlreadyExists"
 	codeInvalidTimestamp    = "InvalidTimestamp"
 	codeInvalidMarker       = "InvalidMarker"
+	codeVersionConflict     = "VersionConflict"
 	codeStorageUnavailable  = "storage_unavailable"
 )
 

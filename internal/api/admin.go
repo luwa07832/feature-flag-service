@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -25,6 +26,18 @@ type putConfigRequest struct {
 type window struct {
 	StartsAt *string `json:"starts_at"`
 	EndsAt   *string `json:"ends_at"`
+}
+
+// conditionalConfigRequest is the compare-and-swap configuration write body.
+// ExpectedVersion keeps the raw JSON so an explicit null ("no effective
+// configuration expected") stays distinguishable from a missing field, which
+// is invalid. Enabled and Percentage are pointers so missing fields fail
+// validation instead of silently defaulting.
+type conditionalConfigRequest struct {
+	ExpectedVersion json.RawMessage `json:"expected_version"`
+	Enabled         *bool           `json:"enabled"`
+	Percentage      *int            `json:"percentage"`
+	Window          *window         `json:"window"`
 }
 
 func createEnvironment(st *store.Store) gin.HandlerFunc {
@@ -99,6 +112,64 @@ func deleteConfig(st *store.Store) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, configJSON(*record))
+	}
+}
+
+// postConfigConditional is the concurrency-safe configuration replacement
+// entry: it appends exactly one immutable version, but only when
+// expected_version still matches the current effective configuration version
+// at execution time (a tombstone on top counts as no effective version).
+// Validation order is fixed: identifiers, request body, environment, flag,
+// then the version check inside the serialized store write.
+func postConfigConditional(st *store.Store) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		environment := c.Param("environment")
+		flagKey := c.Param("flagKey")
+		if !validPathKeys(c, environment, flagKey) {
+			return
+		}
+		var req conditionalConfigRequest
+		if !decodeStrict(c, &req) {
+			return
+		}
+		if req.ExpectedVersion == nil || req.Enabled == nil || req.Percentage == nil {
+			fail(c, http.StatusBadRequest, codeInvalidRequest, "expected_version, enabled and percentage are required")
+			return
+		}
+		if *req.Percentage < 0 || *req.Percentage > 100 {
+			fail(c, http.StatusBadRequest, codeInvalidRequest, "percentage must be between 0 and 100")
+			return
+		}
+		var expectedVersion *string
+		if !bytes.Equal(bytes.TrimSpace(req.ExpectedVersion), []byte("null")) {
+			var version string
+			if err := json.Unmarshal(req.ExpectedVersion, &version); err != nil {
+				fail(c, http.StatusBadRequest, codeInvalidRequest, "expected_version must be a string or null")
+				return
+			}
+			expectedVersion = &version
+		}
+		startsAt, endsAt, ok := parseWindow(c, req.Window)
+		if !ok {
+			return
+		}
+		if !referencedResourcesExist(c, st, environment, flagKey) {
+			return
+		}
+		record, err := st.PutConfigConditional(store.PutConfigConditionalInput{
+			FlagKey:         flagKey,
+			Environment:     environment,
+			ExpectedVersion: expectedVersion,
+			Enabled:         *req.Enabled,
+			Percentage:      *req.Percentage,
+			StartsAt:        startsAt,
+			EndsAt:          endsAt,
+		})
+		if err != nil {
+			writeStoreError(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, configJSON(*record))
 	}
 }
 
@@ -192,6 +263,8 @@ func writeStoreError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, store.ErrAlreadyExists):
 		fail(c, http.StatusConflict, codeAlreadyExists, "the resource already exists")
+	case errors.Is(err, store.ErrVersionConflict):
+		fail(c, http.StatusConflict, codeVersionConflict, "the expected version does not match the current effective configuration version")
 	case errors.Is(err, store.ErrNotFound):
 		fail(c, http.StatusNotFound, codeFlagNotFound, "no live configuration exists for the flag in the environment")
 	default:
