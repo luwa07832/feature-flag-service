@@ -40,6 +40,7 @@ func NewRouter(st *store.Store) *gin.Engine {
 		v1.GET("/environments/:environment/flags/:flagKey/history", getHistory(st))
 		v1.PUT("/environments/:environment/flags/:flagKey/config", putConfig(st))
 		v1.DELETE("/environments/:environment/flags/:flagKey/config", deleteConfig(st))
+		v1.POST("/environments/:environment/flags/:flagKey/config/conditional", replaceConfigConditional(st))
 	}
 
 	router.NoRoute(func(c *gin.Context) {

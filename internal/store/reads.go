@@ -288,7 +288,7 @@ func latestRecordTx(tx *sql.Tx, flagKey, environment string, at int64) (*ConfigR
 		flagKey, environment, at,
 	)
 	record, err := scanConfig(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

@@ -22,6 +22,7 @@ const (
 	codeInvalidTimestamp    = "InvalidTimestamp"
 	codeInvalidMarker       = "InvalidMarker"
 	codeStorageUnavailable  = "storage_unavailable"
+	codeVersionConflict     = "VersionConflict"
 )
 
 func fail(c *gin.Context, status int, code, message string) {

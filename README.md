@@ -77,6 +77,25 @@ go run .
   `window` 整体或其中任一端点可省略。响应返回新配置版本（含 `version` 与 `changed_at`）。
 - `DELETE /api/v1/environments/{environment}/flags/{flagKey}/config` —— 对当前配置追加墓碑记录。
 
+### 并发安全的条件配置替换（本次新增）
+
+`POST /api/v1/environments/{environment}/flags/{flagKey}/config/conditional`
+
+以乐观并发控制追加一个新配置版本：仅当执行时的当前有效配置版本与 `expected_version` 一致时才写入。墓碑版本不算有效版本。
+
+请求体：
+```json
+{"expected_version":"cfg-…","enabled":true,"percentage":50,"window":{"starts_at":"2026-01-01T03:00:00Z","ends_at":"2026-01-01T06:00:00Z"}}
+```
+
+- `expected_version`（必填）：只接受字符串或 JSON `null`；字符串为调用方读取到的当前有效配置版本，`null` 表示当前必须无有效配置（最后一条是墓碑，或此前没有任何记录）。
+- `enabled`（必填，布尔）、`percentage`（必填，0–100 整数）的类型与取值规则沿用 `PUT` 配置入口；`window` 可整体省略或为 `null`，其端点、RFC 3339 时间语义（`ends_at` 必须晚于 `starts_at`）也与 `PUT` 完全一致。
+- 校验顺序：路径标识 → 请求体（字段存在性与类型、`percentage` 区间、`expected_version` 类型、窗口时间、窗口先后）→ 环境存在性 → 开关存在性 → 版本比较。
+- 错误：字段缺失或类型错误、`percentage` 超出 0–100、`expected_version` 不是字符串或 `null` 返回 400 `InvalidRequest`；窗口时间无法解析返回 400 `InvalidTimestamp`；`ends_at` 不晚于 `starts_at` 返回 400 `InvalidRequest`；环境不存在返回 404 `EnvironmentNotFound`；开关不存在返回 404 `FlagNotFound`；`expected_version` 与执行时的当前有效配置版本不一致返回 409 `VersionConflict`。错误体仍是只含 `code`、`message` 的顶层 `error` 对象。
+- 并发语义：并发提交相同 `expected_version` 时最多一个请求成功（201），其余得到 409 `VersionConflict`；失败请求不追加配置版本或其他任何记录。
+- 成功时只追加一个不可变新版本，返回 201 与现有配置版本完全相同的形状（`flag_key`、`environment`、`version`、`enabled`、`percentage`、`window`、`changed_at`、`tombstone`，空窗口端点为 `null`）。新版本立即参与配置历史、环境变更、实时评估、历史时点评估、解释与跨环境对比，分桶输入不变。
+- 无竞争时以相同内容重复提交会生成不同的新版本，只有最新版本影响当前状态；`PUT`、`DELETE` 入口、定义历史、墓碑语义、旧数据库数据与跨重启顺序均不受影响。
+
 ### 实时评估（既有行为）
 
 `GET /api/v1/environments/{environment}/evaluate?marker=alpha`
@@ -219,4 +238,4 @@ go run .
 | 400 | `InvalidMarker` | `marker` 不符合标记格式（实时评估缺失标记同样返回此码） |
 | 404 | `EnvironmentNotFound` | 环境不存在，或该环境在 `at` 时点没有任何可还原的有效配置 |
 
-其他错误码：`InvalidRequest`（请求体或参数不合法）、`FlagNotFound`（开关不存在或无可删除配置）、`AlreadyExists`（重复创建）、`route_not_found`（路径无匹配）、`internal_error`（服务内部故障）、`storage_unavailable`（健康检查发现存储不可用）。
+其他错误码：`InvalidRequest`（请求体或参数不合法）、`FlagNotFound`（开关不存在或无可删除配置）、`AlreadyExists`（重复创建）、`VersionConflict`（条件替换的 `expected_version` 与执行时当前有效配置版本不一致）、`route_not_found`（路径无匹配）、`internal_error`（服务内部故障）、`storage_unavailable`（健康检查发现存储不可用）。

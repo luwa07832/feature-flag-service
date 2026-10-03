@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -18,6 +19,10 @@ type Store struct {
 	// versionSeq disambiguates configuration versions created within the same
 	// nanosecond. Configuration history is append-only.
 	versionSeq atomic.Uint64
+	// configMu serializes every config-history write so a compare-and-swap
+	// (conditional replace) is atomic against concurrent PUT/DELETE writes
+	// sharing this Store handle.
+	configMu sync.Mutex
 }
 
 // Open prepares the database file and the schema this service needs.
@@ -28,7 +33,11 @@ func Open(path string) (*Store, error) {
 // OpenWithClock is Open with an injectable clock; production uses Open and
 // deterministic tests use this entry point.
 func OpenWithClock(path string, now func() time.Time) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	// busy_timeout makes concurrent writers wait for the write lock instead
+	// of failing immediately with SQLITE_BUSY; configMu below adds the
+	// in-process compare-and-swap guarantee.
+	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(5000)", path)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -65,6 +74,10 @@ var ErrNotFound = errors.New("not found")
 
 // ErrAlreadyExists reports a create request for an existing key.
 var ErrAlreadyExists = errors.New("already exists")
+
+// ErrVersionConflict reports a conditional replace whose expected_version no
+// longer matches the current live (non-tombstone) configuration version.
+var ErrVersionConflict = errors.New("version conflict")
 
 const schema = `
 CREATE TABLE IF NOT EXISTS service_metadata (
